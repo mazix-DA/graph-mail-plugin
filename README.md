@@ -1,16 +1,70 @@
-# Valtimo Plugin Template
+# Graph Mail Plugin
 
-A template repository for building your own Valtimo plugins. Copy this project to get a ready-made structure with build
-configuration, CI/CD workflows, and a working example to start from.
+Valtimo plugin voor het versturen van e-mail via de Microsoft Graph API met OAuth2 (Client Credentials flow).
 
-## Getting started
+## Documentatie
 
-1. Copy or fork this repository
-2. Rename the sample plugin package, module, and configuration to match your plugin
-3. Follow the [Getting Started](documentation/getting-started.md) guide for setup and development instructions
+- [Getting Started](documentation/getting-started.md) — installatie en buildinstructies
+- [Plugin Documentatie](documentation/plugin.md) — pluginconfiguratie, acties en aandachtspunten
 
-## Documentation
+## Vereisten
 
-- [Getting Started](documentation/getting-started.md) — setup and development instructions
-- [Example Application](documentation/example-application.md) — running the example app locally
-- [Sample Plugin](documentation/plugin.md) — reference implementation included in this template
+- Valtimo 13.x
+- Azure App Registration met de applicatiemachtigingen:
+  - `Mail.Send` — vereist voor alle e-mailverzendingen
+  - `Mail.ReadWrite` — vereist voor bijlagen groter dan 3 MB
+- Client secret aangemaakt onder *Certificates & secrets*
+
+## Installatie
+
+### Backend
+
+Voeg toe aan `build.gradle.kts`:
+
+```kotlin
+implementation("com.ritense.valtimoplugins:graph-mail:1.0.0")
+```
+
+Voeg toe aan `application.yml`:
+
+```yaml
+operaton:
+  bpm:
+    job-executor:
+      core-pool-size: 20
+      max-pool-size: 50
+```
+
+### Frontend
+
+```shell
+npm install @valtimo-plugins/graph-mail
+```
+
+Voeg de module en specificatie toe aan je `AppModule`:
+
+```typescript
+import { NgModule } from '@angular/core';
+import { PLUGINS_TOKEN } from '@valtimo/plugin';
+import { GraphMailPluginModule, graphMailPluginSpecification } from '@valtimo-plugins/graph-mail';
+
+@NgModule({
+  imports: [
+    // ... andere imports
+    GraphMailPluginModule,
+  ],
+  providers: [
+    { provide: PLUGINS_TOKEN, useValue: [graphMailPluginSpecification] },
+  ],
+})
+export class AppModule {}
+```
+
+## Snel overzicht
+
+| | |
+|---|---|
+| **Protocol** | OAuth2 Client Credentials → Microsoft Graph API |
+| **Verzendpaden** | Inline (≤ 3 MB bijlagen) en upload-sessie (> 3 MB, tot 25 MB) |
+| **Authenticatie** | Per tenant/client gecachte access tokens |
+| **Logging** | PII-gemaskeerd, apart auditlogger (`entra.plugin.audit`) |
