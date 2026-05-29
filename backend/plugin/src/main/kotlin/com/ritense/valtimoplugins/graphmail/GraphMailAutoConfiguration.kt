@@ -58,10 +58,13 @@ class GraphMailAutoConfiguration {
     @ConditionalOnMissingBean(GraphMailPluginFactory::class)
     fun graphMailPluginFactory(
         pluginService: PluginService,
-        graphMailClient: GraphMailClient,
+        restTemplateBuilder: RestTemplateBuilder,
+        objectMapper: ObjectMapper,
         resourceStorageService: TemporaryResourceStorageService,
         eventPublisher: ApplicationEventPublisher,
-    ): GraphMailPluginFactory = GraphMailPluginFactory(pluginService, graphMailClient, resourceStorageService, eventPublisher)
+    ): GraphMailPluginFactory = GraphMailPluginFactory(
+        pluginService, restTemplateBuilder, objectMapper, resourceStorageService, eventPublisher
+    )
 
     @Bean
     @ConditionalOnMissingBean(GraphMailTestSendController::class)

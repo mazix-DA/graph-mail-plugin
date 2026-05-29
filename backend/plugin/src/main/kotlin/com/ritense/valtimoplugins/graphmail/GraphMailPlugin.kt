@@ -1,5 +1,6 @@
 package com.ritense.valtimoplugins.graphmail
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.ritense.plugin.annotation.Plugin
 import com.ritense.plugin.annotation.PluginAction
 import com.ritense.plugin.annotation.PluginActionProperty
@@ -10,8 +11,11 @@ import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
 import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.slf4j.LoggerFactory
+import org.springframework.boot.web.client.RestTemplateBuilder
 import org.springframework.context.ApplicationEventPublisher
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import java.io.ByteArrayOutputStream
+import java.time.Duration
 
 private const val MAX_RECIPIENTS_PER_FIELD = 100
 private const val MAX_RECIPIENTS_TOTAL = 200
@@ -74,10 +78,38 @@ private fun parseRecipients(values: List<String>, fieldName: String): List<Graph
     description = "Send emails via Microsoft Graph API with OAuth2 (Client Credentials)",
 )
 class GraphMailPlugin(
-    private val graphMailClient: GraphMailClient,
+    private val restTemplateBuilder: RestTemplateBuilder,
+    private val objectMapper: ObjectMapper,
     private val resourceStorageService: TemporaryResourceStorageService,
     private val eventPublisher: ApplicationEventPublisher,
 ) {
+    // Only set by the internal test constructor — overrides the lazy-built client.
+    private var clientOverride: GraphMailClient? = null
+
+    // Initialized lazily so that @PluginProperty values (tokenBaseUrl, graphBaseUrl,
+    // connectTimeoutSeconds, readTimeoutSeconds) are already injected by Valtimo before
+    // the first sendEmail() call triggers this block.
+    private val client: GraphMailClient by lazy {
+        clientOverride ?: run {
+            val rt = restTemplateBuilder
+                .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
+                .readTimeout(Duration.ofSeconds(readTimeoutSeconds))
+                .build()
+            rt.messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
+            rt.messageConverters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
+            GraphMailClientImpl(rt, tokenBaseUrl, graphBaseUrl)
+        }
+    }
+
+    // Unit-test backdoor: avoids needing a real RestTemplateBuilder / ObjectMapper in tests.
+    internal constructor(
+        graphMailClient: GraphMailClient,
+        resourceStorageService: TemporaryResourceStorageService,
+        eventPublisher: ApplicationEventPublisher,
+    ) : this(RestTemplateBuilder(), ObjectMapper(), resourceStorageService, eventPublisher) {
+        this.clientOverride = graphMailClient
+    }
+
     private val logger = LoggerFactory.getLogger(GraphMailPlugin::class.java)
 
     // Dedicated audit logger — configure appenders/log levels separately in logback.xml if needed.
@@ -182,7 +214,7 @@ class GraphMailPlugin(
 
         val auditStart = System.currentTimeMillis()
         try {
-            graphMailClient.sendMail(
+            client.sendMail(
                 tenantId = tenantId,
                 clientId = clientId,
                 clientSecret = clientSecret,
