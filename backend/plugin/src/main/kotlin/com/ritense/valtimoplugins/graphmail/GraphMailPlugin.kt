@@ -1,18 +1,3 @@
-/*
- * Copyright 2015-2025 Ritense BV, the Netherlands.
- *
- * Licensed under EUPL, Version 1.2 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" basis,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package com.ritense.valtimoplugins.graphmail
 
 import com.ritense.plugin.annotation.Plugin
@@ -110,6 +95,18 @@ class GraphMailPlugin(
 
     @PluginProperty(key = "testSenderMailbox", secret = false, required = false)
     var testSenderMailbox: String? = null
+
+    @PluginProperty(key = "tokenBaseUrl", secret = false, required = false)
+    var tokenBaseUrl: String = "https://login.microsoftonline.com"
+
+    @PluginProperty(key = "graphBaseUrl", secret = false, required = false)
+    var graphBaseUrl: String = "https://graph.microsoft.com"
+
+    @PluginProperty(key = "connectTimeoutSeconds", secret = false, required = false)
+    var connectTimeoutSeconds: Long = 10
+
+    @PluginProperty(key = "readTimeoutSeconds", secret = false, required = false)
+    var readTimeoutSeconds: Long = 30
 
     // NOTE: USER_TASK_CREATE fires when a user task is committed to the database.
     // If the surrounding Operaton transaction rolls back and retries (e.g. optimistic lock),

@@ -1,18 +1,3 @@
-/*
- * Copyright 2015-2025 Ritense BV, the Netherlands.
- *
- * Licensed under EUPL, Version 1.2 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" basis,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package com.ritense.valtimoplugins.graphmail
 
 import com.fasterxml.jackson.annotation.JsonInclude
@@ -23,7 +8,7 @@ const val GRAPH_BODY_CONTENT_TYPE_TEXT = "Text"
 
 // Attachments at or below this threshold are embedded inline (base64) in the sendMail JSON body.
 // Larger files use the upload-session flow (create draft → chunked PUT → send).
-const val INLINE_ATTACHMENT_THRESHOLD_BYTES = 3L * 1024L * 1024L
+const val INLINE_ATTACHMENT_THRESHOLD_BYTES = 2L * 1024L * 1024L
 
 // Hard limits enforced before any API call — raised to 25 MB now that upload sessions are supported.
 const val MAX_SINGLE_ATTACHMENT_BYTES = 25L * 1024L * 1024L
