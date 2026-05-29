@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:camunda="http://camunda.org/schema/1.0/bpmn" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn"><bpmn:process id="Process_1" processType="None" isClosed="false" isExecutable="true" camunda:versionTag="CD:test:1.0.0"><bpmn:startEvent id="StartEvent_1"><bpmn:outgoing>Flow_0ldib4u</bpmn:outgoing></bpmn:startEvent><bpmn:serviceTask id="Activity_0sw8hfr" name="Maak een pv" implementation="##WebService" camunda:expression="${execution.setVariable(&#39;sendermailbox&#39;, &#39;mooad.dahmazi@sittard-geleen.nl&#39;)}"><bpmn:incoming>Flow_0ldib4u</bpmn:incoming><bpmn:outgoing>Flow_pv_to_attachment</bpmn:outgoing></bpmn:serviceTask><bpmn:scriptTask id="Task_MaakBijlage" name="Maak testbijlage aan" scriptFormat="groovy"><bpmn:incoming>Flow_pv_to_attachment</bpmn:incoming><bpmn:outgoing>Flow_attachment_to_body</bpmn:outgoing><bpmn:script>
+import org.operaton.bpm.engine.impl.context.Context
+import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration
+import com.ritense.resource.service.TemporaryResourceStorageService
+
+def config = Context.getProcessEngineConfiguration() as SpringProcessEngineConfiguration
+def storageService = config.applicationContext.getBean(TemporaryResourceStorageService)
+
+// Genereer een ~10 MB PDF met geldige header + comment-padding
+def baos = new java.io.ByteArrayOutputStream()
+def header = """%PDF-1.4
+1 0 obj&lt;&lt;/Type /Catalog /Pages 2 0 R&gt;&gt;endobj
+2 0 obj&lt;&lt;/Type /Pages /Kids [3 0 R] /Count 1&gt;&gt;endobj
+3 0 obj&lt;&lt;/Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]&gt;&gt;endobj
+xref
+0 4
+trailer&lt;&lt;/Size 4 /Root 1 0 R&gt;&gt;
+%%EOF
+""".getBytes("UTF-8")
+baos.write(header)
+
+def commentLine = ("% " + ("X" * 76) + "\n").getBytes("UTF-8")
+def targetSize = 10 * 1024 * 1024
+while (baos.size() &lt; targetSize) {
+    baos.write(commentLine)
+}
+
+def attachmentId = storageService.store(
+    new java.io.ByteArrayInputStream(baos.toByteArray()),
+    ["fileName": "test-bijlage-10mb.pdf", "contentType": "application/pdf"]
+)
+execution.setVariable("attachmentId", attachmentId)
+      </bpmn:script></bpmn:scriptTask><bpmn:scriptTask id="Activity_1ndk5x9" name="Inhoud mail" scriptFormat="groovy"><bpmn:incoming>Flow_attachment_to_body</bpmn:incoming><bpmn:outgoing>Flow_191g1fk</bpmn:outgoing><bpmn:script>
+import org.operaton.bpm.engine.impl.context.Context
+import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration
+import com.ritense.resource.service.TemporaryResourceStorageService
+
+def config = Context.getProcessEngineConfiguration() as SpringProcessEngineConfiguration
+def storageService = config.applicationContext.getBean(TemporaryResourceStorageService)
+
+def htmlBody = """&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;body&gt;
+&lt;h2&gt;Testmail Graph Mail Plugin&lt;/h2&gt;
+&lt;p&gt;Beste ontvanger,&lt;/p&gt;
+&lt;p&gt;Dit is een testbericht verzonden via de &lt;strong&gt;Graph Mail Plugin&lt;/strong&gt;.&lt;/p&gt;
+&lt;table border="1" cellpadding="6" cellspacing="0"&gt;
+  &lt;tr&gt;&lt;td&gt;&lt;strong&gt;Naam&lt;/strong&gt;&lt;/td&gt;&lt;td&gt;Pietje van Patje&lt;/td&gt;&lt;/tr&gt;
+  &lt;tr&gt;&lt;td&gt;&lt;strong&gt;E-mail&lt;/strong&gt;&lt;/td&gt;&lt;td&gt;pietje@patje.nl&lt;/td&gt;&lt;/tr&gt;
+  &lt;tr&gt;&lt;td&gt;&lt;strong&gt;Zaaknummer&lt;/strong&gt;&lt;/td&gt;&lt;td&gt;ZAK-2025-00001&lt;/td&gt;&lt;/tr&gt;
+  &lt;tr&gt;&lt;td&gt;&lt;strong&gt;Status&lt;/strong&gt;&lt;/td&gt;&lt;td&gt;In behandeling&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&lt;p&gt;Met vriendelijke groet&lt;/p&gt;
+&lt;/body&gt;
+&lt;/html&gt;"""
+
+def contentId = storageService.store(
+    new java.io.ByteArrayInputStream(htmlBody.getBytes("UTF-8")),
+    ["fileName": "email-body.html", "contentType": "text/html"]
+)
+execution.setVariable("contentId", contentId)
+      </bpmn:script></bpmn:scriptTask><bpmn:serviceTask id="Activity_19k5o12" name="Verstuur mail" camunda:asyncAfter="true" implementation="##WebService" camunda:expression="${null}"><bpmn:incoming>Flow_191g1fk</bpmn:incoming><bpmn:outgoing>Flow_04lywp8</bpmn:outgoing></bpmn:serviceTask><bpmn:endEvent id="Event_0usjg4k"><bpmn:incoming>Flow_04lywp8</bpmn:incoming></bpmn:endEvent><bpmn:sequenceFlow id="Flow_0ldib4u" sourceRef="StartEvent_1" targetRef="Activity_0sw8hfr" /><bpmn:sequenceFlow id="Flow_pv_to_attachment" sourceRef="Activity_0sw8hfr" targetRef="Task_MaakBijlage" /><bpmn:sequenceFlow id="Flow_attachment_to_body" sourceRef="Task_MaakBijlage" targetRef="Activity_1ndk5x9" /><bpmn:sequenceFlow id="Flow_191g1fk" sourceRef="Activity_1ndk5x9" targetRef="Activity_19k5o12" /><bpmn:sequenceFlow id="Flow_04lywp8" sourceRef="Activity_19k5o12" targetRef="Event_0usjg4k" /></bpmn:process><bpmndi:BPMNDiagram id="BPMNDiagram_1"><bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1"><bpmndi:BPMNShape id="_BPMNShape_StartEvent_2" bpmnElement="StartEvent_1"><dc:Bounds x="152" y="172" width="36" height="36" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="Activity_0sw8hfr_di" bpmnElement="Activity_0sw8hfr"><dc:Bounds x="250" y="150" width="100" height="80" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="Task_MaakBijlage_di" bpmnElement="Task_MaakBijlage"><dc:Bounds x="410" y="150" width="100" height="80" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="Activity_1ndk5x9_di" bpmnElement="Activity_1ndk5x9"><dc:Bounds x="570" y="150" width="100" height="80" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="Activity_19k5o12_di" bpmnElement="Activity_19k5o12"><dc:Bounds x="730" y="150" width="100" height="80" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="Event_0usjg4k_di" bpmnElement="Event_0usjg4k"><dc:Bounds x="892" y="172" width="36" height="36" /></bpmndi:BPMNShape><bpmndi:BPMNEdge id="Flow_0ldib4u_di" bpmnElement="Flow_0ldib4u"><di:waypoint x="188" y="190" /><di:waypoint x="250" y="190" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="Flow_pv_to_attachment_di" bpmnElement="Flow_pv_to_attachment"><di:waypoint x="350" y="190" /><di:waypoint x="410" y="190" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="Flow_attachment_to_body_di" bpmnElement="Flow_attachment_to_body"><di:waypoint x="510" y="190" /><di:waypoint x="570" y="190" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="Flow_191g1fk_di" bpmnElement="Flow_191g1fk"><di:waypoint x="670" y="190" /><di:waypoint x="730" y="190" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="Flow_04lywp8_di" bpmnElement="Flow_04lywp8"><di:waypoint x="830" y="190" /><di:waypoint x="892" y="190" /></bpmndi:BPMNEdge></bpmndi:BPMNPlane></bpmndi:BPMNDiagram></bpmn:definitions>
