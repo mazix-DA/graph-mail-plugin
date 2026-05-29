@@ -478,7 +478,7 @@ class GraphMailClientImpl(
         val expectedHost  = runCatching { java.net.URI.create(graphBaseUrl).host  }.getOrElse { "graph.microsoft.com" }
         val actualScheme  = runCatching { java.net.URI.create(uploadUrl).scheme   }.getOrNull()
         val actualHost    = runCatching { java.net.URI.create(uploadUrl).host     }.getOrNull()
-        val microsoftHosts = listOf(".microsoft.com", ".office.com", ".office.net")
+        val microsoftHosts = listOf(".microsoft.com", ".office.com", ".office.net", ".office365.com")
         require(actualScheme == expectedScheme &&
             (actualHost == expectedHost || microsoftHosts.any { actualHost?.endsWith(it) == true })) {
             "Upload URL from Graph API failed domain validation"
