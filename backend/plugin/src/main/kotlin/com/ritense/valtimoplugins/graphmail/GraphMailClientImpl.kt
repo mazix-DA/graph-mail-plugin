@@ -1,18 +1,3 @@
-/*
- * Copyright 2015-2025 Ritense BV, the Netherlands.
- *
- * Licensed under EUPL, Version 1.2 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" basis,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package com.ritense.valtimoplugins.graphmail
 
 import org.slf4j.LoggerFactory
@@ -51,7 +36,7 @@ private const val MAX_SEND_WALL_CLOCK_MS = 30_000L
 // Longer deadline for the draft+upload flow — large uploads can take tens of seconds.
 private const val MAX_DRAFT_SEND_WALL_CLOCK_MS = 120_000L
 private const val CHUNK_MAX_RETRIES = 3
-// Default token cache capacity — override via entra.plugin.max-cached-tokens.
+// Default token cache capacity — override via constructor parameter.
 // Increase if the deployment manages more than 64 distinct Entra app registrations.
 private const val DEFAULT_maxCachedTokens = 64
 
