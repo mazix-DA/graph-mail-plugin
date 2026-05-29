@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.boot.web.client.RestTemplateBuilder
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
+import org.springframework.web.client.RestClient
 import java.io.ByteArrayOutputStream
 import java.time.Duration
 
@@ -97,7 +98,7 @@ class GraphMailPlugin(
                 .build()
             rt.messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
             rt.messageConverters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
-            GraphMailClientImpl(rt, tokenBaseUrl, graphBaseUrl)
+            GraphMailClientImpl(RestClient.create(rt), tokenBaseUrl, graphBaseUrl)
         }
     }
 

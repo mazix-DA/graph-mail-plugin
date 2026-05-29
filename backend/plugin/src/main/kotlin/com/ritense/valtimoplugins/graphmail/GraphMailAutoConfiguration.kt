@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.event.EventListener
 import org.springframework.core.annotation.Order
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
+import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestTemplate
 import java.time.Duration
 
@@ -51,7 +52,7 @@ class GraphMailAutoConfiguration {
             .build()
             .also { configureJackson(it, objectMapper) }
 
-        return GraphMailClientImpl(restTemplate)
+        return GraphMailClientImpl(RestClient.create(restTemplate))
     }
 
     @Bean
