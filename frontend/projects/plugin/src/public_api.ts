@@ -17,3 +17,5 @@
 export * from './lib/graph-mail.module';
 export * from './lib/graph-mail.plugin.specification';
 export * from './lib/models';
+export * from './lib/components/graph-mail-configuration/graph-mail-configuration.component';
+export * from './lib/components/send-email-configuration/send-email-configuration.component';
