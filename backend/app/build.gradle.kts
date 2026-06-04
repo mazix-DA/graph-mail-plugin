@@ -1,6 +1,5 @@
 val kotlinLoggingVersion: String by project
 val nettyResolverDnsNativeMacOsVersion: String by project
-val groovyVersion: String by project
 
 dependencies {
     implementation(platform("com.ritense.valtimo:valtimo-dependency-versions"))
@@ -17,8 +16,6 @@ dependencies {
     }
 
     implementation(project(":backend:plugin"))
-
-    runtimeOnly("org.apache.groovy:groovy-all:$groovyVersion")
 }
 
 tasks.jar {
