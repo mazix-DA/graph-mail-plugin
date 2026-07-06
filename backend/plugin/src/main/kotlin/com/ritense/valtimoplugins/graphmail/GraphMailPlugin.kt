@@ -126,6 +126,15 @@ class GraphMailPlugin(
     @PluginProperty(key = "clientSecret", secret = true, required = true)
     lateinit var clientSecret: String
 
+    // Strict sender allowlist (deny-by-default): comma-separated full addresses
+    // ("noreply@example.com") and/or domain entries ("@example.com"). Every send —
+    // including via process data (pv:) — is rejected unless senderMailbox matches an entry.
+    // This limits which mailboxes the tenant-wide Mail.Send application permission can
+    // actually be used for through this plugin; pair it with an Exchange Online
+    // Application Access Policy for enforcement outside the plugin as well.
+    @PluginProperty(key = "allowedSenders", secret = false, required = true)
+    lateinit var allowedSenders: String
+
     @PluginProperty(key = "testSenderMailbox", secret = false, required = false)
     var testSenderMailbox: String? = null
 
@@ -176,6 +185,10 @@ class GraphMailPlugin(
         check(::clientSecret.isInitialized && clientSecret.isNotBlank()) {
             "Plugin property 'clientSecret' is not configured — check the Graph Mail plugin configuration"
         }
+        check(::allowedSenders.isInitialized && allowedSenders.isNotBlank()) {
+            "Plugin property 'allowedSenders' is not configured — the sender allowlist is required. " +
+                "Add the permitted sender mailboxes (or '@domain' entries) to the Graph Mail plugin configuration"
+        }
 
         // Header injection guard — same fields the frontend already validates,
         // re-checked server-side for defense in depth.
@@ -183,6 +196,9 @@ class GraphMailPlugin(
         requireNoControlChars(subject, "subject")
 
         require(isValidEmail(senderMailbox)) { "Invalid sender email: '$senderMailbox'" }
+        require(isSenderAllowed(senderMailbox, allowedSendersList())) {
+            "Sender '$senderMailbox' is not on the 'allowedSenders' allowlist of this plugin configuration"
+        }
 
         require(subject.isNotBlank()) { "Email subject must not be blank" }
         require(subject.length <= MAX_SUBJECT_LENGTH) {
@@ -268,6 +284,12 @@ class GraphMailPlugin(
             throw ex
         }
     }
+
+    // Empty when the property is missing (pre-allowlist configurations) — callers treat
+    // an empty list as deny-all. `isInitialized` is only accessible inside this class,
+    // so the test-send controller goes through this accessor.
+    internal fun allowedSendersList(): List<String> =
+        if (::allowedSenders.isInitialized) parseStringListParam(allowedSenders) else emptyList()
 
     private fun publishEventSafely(event: Any) {
         try {

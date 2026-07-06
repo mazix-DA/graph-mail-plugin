@@ -48,11 +48,13 @@ class GraphMailTestSendControllerTest {
     }
     private lateinit var controller: GraphMailTestSendController
 
-    private fun plugin(sender: String? = VALID_SENDER): GraphMailPlugin =
+    private fun plugin(sender: String? = VALID_SENDER, allowlist: String? = "@test.nl"): GraphMailPlugin =
         GraphMailPlugin(mailClient, storage, eventPublisher).apply {
             tenantId = "tenant-id"
             clientId = "client-id"
             clientSecret = "client-secret"
+            // allowlist == null simulates a pre-allowlist configuration (property never injected).
+            if (allowlist != null) allowedSenders = allowlist
             testSenderMailbox = sender
         }
 
@@ -73,8 +75,8 @@ class GraphMailTestSendControllerTest {
         whenever(mailClient.sendMail(any(), any(), any(), any(), any(), any(), any(), any(),
             any(), any(), any(), any()))
 
-    private fun stubPlugin(sender: String? = VALID_SENDER) =
-        whenever(pluginService.createInstance(any<PluginConfigurationId>())).thenReturn(plugin(sender))
+    private fun stubPlugin(sender: String? = VALID_SENDER, allowlist: String? = "@test.nl") =
+        whenever(pluginService.createInstance(any<PluginConfigurationId>())).thenReturn(plugin(sender, allowlist))
 
     // ── Input validation ──────────────────────────────────────────────────────────
 
@@ -139,6 +141,38 @@ class GraphMailTestSendControllerTest {
         val response = send(GraphMailTestSendRequest(VALID_CONFIG_ID, VALID_RECIPIENT, "not-an-email"))
         assertEquals(HttpStatus.BAD_REQUEST, response.statusCode)
         assertFalse(response.body!!.success)
+    }
+
+    // ── Sender allowlist enforcement ───────────────────────────────────────────────
+
+    @Test fun `returns 400 when allowedSenders is not configured`() {
+        stubPlugin(allowlist = null)
+        val response = send()
+        assertEquals(HttpStatus.BAD_REQUEST, response.statusCode)
+        assertFalse(response.body!!.success)
+        assertTrue(response.body!!.message.contains("allowedSenders"))
+    }
+
+    @Test fun `returns 400 when allowedSenders is blank`() {
+        stubPlugin(allowlist = "   ")
+        val response = send()
+        assertEquals(HttpStatus.BAD_REQUEST, response.statusCode)
+        assertFalse(response.body!!.success)
+    }
+
+    @Test fun `returns 403 when test sender is not on the allowlist`() {
+        stubPlugin(allowlist = "noreply@gemeente.nl")
+        val response = send(GraphMailTestSendRequest(VALID_CONFIG_ID, VALID_RECIPIENT, "ceo@gemeente.nl"))
+        assertEquals(HttpStatus.FORBIDDEN, response.statusCode)
+        assertFalse(response.body!!.success)
+        assertEquals(403, response.body!!.statusCode)
+    }
+
+    @Test fun `accepts test sender matching a domain allowlist entry`() {
+        stubPlugin(allowlist = "@test.nl")
+        val response = send()
+        assertEquals(HttpStatus.OK, response.statusCode)
+        assertTrue(response.body!!.success)
     }
 
     // ── Happy path ─────────────────────────────────────────────────────────────────

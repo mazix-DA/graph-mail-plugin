@@ -30,7 +30,9 @@ spring:
             client-id: valtimo-console
           keycloakapi:
             client-id: valtimo-user-m2m-client
-            client-secret: 6ef6ca16-6b86-482a-a3d9-0561704c1db9
+            # Default is de bekende secret van de lokale Keycloak-sandbox (imports/keycloak/realm.json).
+            # Uitsluitend voor lokale ontwikkeling — override via env var, nooit in productie gebruiken.
+            client-secret: ${KEYCLOAK_M2M_CLIENT_SECRET:6ef6ca16-6b86-482a-a3d9-0561704c1db9}
             authorization-grant-type: authorization_code
             scope: openid
   liquibase:
@@ -81,7 +83,10 @@ valtimo:
       hosts:
         - localhost
   plugin:
-    encryption-secret: "abcdefghijklmnop"
+    # Sleutel waarmee alle plugin-secrets (o.a. het Graph clientSecret) in de database worden
+    # versleuteld; moet exact 16, 24 of 32 bytes zijn. De default hieronder is een publiek
+    # bekende ontwikkelwaarde — zet in elke echte omgeving een eigen sleutel via de env var.
+    encryption-secret: ${VALTIMO_PLUGIN_ENCRYPTION_SECRET:abcdefghijklmnop}
   docker:
     filter:
       enabled: true
