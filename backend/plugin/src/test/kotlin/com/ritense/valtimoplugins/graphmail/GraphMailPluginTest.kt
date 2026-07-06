@@ -47,6 +47,7 @@ class GraphMailPluginTest {
             tenantId = "test-tenant"
             clientId = "test-client"
             clientSecret = "test-secret"
+            allowedSenders = "@test.nl"
         }
         whenever(storage.getResourceContentAsInputStream(VALID_CONTENT_UUID))
             .thenReturn(ByteArrayInputStream("<p>Test</p>".toByteArray()))
@@ -102,6 +103,54 @@ class GraphMailPluginTest {
 
     @Test fun `rejects invalid sender mailbox`() {
         assertThrows<IllegalArgumentException> { send(mailbox = "not-an-email") }
+    }
+
+    // ── Sender allowlist (strict, deny-by-default) ──────────────────────────
+
+    @Test fun `rejects sender not on the allowlist`() {
+        plugin.allowedSenders = "noreply@gemeente.nl"
+        assertThrows<IllegalArgumentException> { send(mailbox = "ceo@gemeente.nl") }
+    }
+
+    @Test fun `accepts sender matching a full address entry`() {
+        plugin.allowedSenders = "noreply@gemeente.nl, zaken@gemeente.nl"
+        send(mailbox = "zaken@gemeente.nl")
+        verifySend()
+    }
+
+    @Test fun `allowlist matching is case-insensitive`() {
+        plugin.allowedSenders = "NoReply@Gemeente.NL"
+        send(mailbox = "noreply@gemeente.nl")
+        verifySend()
+    }
+
+    @Test fun `accepts sender matching a domain entry`() {
+        plugin.allowedSenders = "@gemeente.nl"
+        send(mailbox = "willekeurig@gemeente.nl")
+        verifySend()
+    }
+
+    @Test fun `domain entry does not match subdomains`() {
+        plugin.allowedSenders = "@gemeente.nl"
+        assertThrows<IllegalArgumentException> { send(mailbox = "user@sub.gemeente.nl") }
+    }
+
+    @Test fun `rejects send when allowedSenders is blank`() {
+        plugin.allowedSenders = "   "
+        assertThrows<IllegalStateException> { send() }
+    }
+
+    @Test fun `rejects send when allowedSenders is not configured`() {
+        // Simulates a pre-allowlist plugin configuration where Valtimo never injected the property.
+        val legacyPlugin = GraphMailPlugin(mailClient, storage, eventPublisher).apply {
+            tenantId = "test-tenant"
+            clientId = "test-client"
+            clientSecret = "test-secret"
+        }
+        assertThrows<IllegalStateException> {
+            legacyPlugin.sendEmail(execution, "afzender@test.nl", "ontvanger@test.nl",
+                null, null, null, "Test", VALID_CONTENT_UUID, null)
+        }
     }
 
     // ── Subject / body validation ──────────────────────────────────────────────────

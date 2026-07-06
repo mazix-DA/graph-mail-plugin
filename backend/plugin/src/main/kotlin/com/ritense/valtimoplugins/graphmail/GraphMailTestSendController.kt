@@ -98,6 +98,31 @@ class GraphMailTestSendController(
             )
         }
 
+        // The sender allowlist applies to test sends too — an admin must not be able to
+        // send as an arbitrary tenant mailbox either. Empty list = deny-all (strict).
+        val allowlist = plugin.allowedSendersList()
+        if (allowlist.isEmpty()) {
+            logger.warn("Test send rejected — 'allowedSenders' is not configured for plugin configuration {}", configIdStr)
+            return ResponseEntity.badRequest().body(
+                GraphMailTestSendResponse(
+                    false,
+                    "De pluginconfiguratie heeft geen 'allowedSenders' (afzender-whitelist) — " +
+                        "vul de toegestane afzendermailboxen in en sla de configuratie op",
+                    400
+                )
+            )
+        }
+        if (!isSenderAllowed(testSender, allowlist)) {
+            logger.warn("Test send rejected — sender {} not on the allowedSenders allowlist", maskEmail(testSender))
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(
+                GraphMailTestSendResponse(
+                    false,
+                    "Afzender staat niet op de 'allowedSenders' whitelist van deze pluginconfiguratie",
+                    403
+                )
+            )
+        }
+
         logger.info(
             "Test send requested — recipient: {}, mailbox: {}",
             maskEmail(request.recipient), maskEmail(testSender)

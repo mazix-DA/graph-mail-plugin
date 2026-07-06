@@ -7,7 +7,12 @@
 - Valtimo 13.x
 - Azure App Registration met de applicatiemachtigingen:
   - `Mail.Send` — vereist voor alle e-mailverzendingen
-  - `Mail.ReadWrite` — vereist voor bijlagen groter dan 3 MB
+  - `Mail.ReadWrite` — **alleen** nodig voor bijlagen groter dan 2 MiB; laat deze machtiging weg als je geen grote bijlagen verstuurt (least privilege)
+
+> **Aanbevolen:** beperk de app registration aan de Exchange Online-kant tot de functionele
+> mailboxen die de plugin gebruikt via een Application Access Policy, en vul in de
+> pluginconfiguratie de verplichte `allowedSenders`-whitelist in.
+> Zie [Plugin Documentatie](plugin.md) voor details.
 
 ## Plugin development
 

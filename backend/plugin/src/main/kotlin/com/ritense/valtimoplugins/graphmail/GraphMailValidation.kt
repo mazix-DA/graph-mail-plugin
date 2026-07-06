@@ -21,6 +21,26 @@ internal fun isValidResourceId(value: String): Boolean {
 internal fun isValidEmail(value: String) =
     value.length <= 254 && !value.contains("..") && EMAIL_REGEX.matches(value)
 
+// Sender allowlist check (deny-by-default). An entry is either a full address
+// ("noreply@example.com") or a domain entry starting with '@' ("@example.com").
+// Matching is case-insensitive. An empty allowlist permits nothing.
+// The domain match anchors on the sender's own '@' separator, so "@example.com"
+// does not match "user@sub.example.com".
+internal fun isSenderAllowed(sender: String, allowlist: List<String>): Boolean {
+    val normalizedSender = sender.trim().lowercase()
+    val senderAt = normalizedSender.indexOf('@')
+    if (senderAt <= 0) return false
+    return allowlist.any { entry ->
+        val normalizedEntry = entry.trim().lowercase()
+        when {
+            normalizedEntry.length < 2 -> false
+            normalizedEntry.startsWith("@") ->
+                normalizedSender.substring(senderAt) == normalizedEntry
+            else -> normalizedSender == normalizedEntry
+        }
+    }
+}
+
 // Header injection guard: any CR or LF inside a header-bearing field is rejected.
 // Defense-in-depth — the Graph API JSON encodes them anyway, but the same fields are
 // echoed in logs and could feed downstream systems with weaker handling.
