@@ -173,6 +173,18 @@ class GraphMailTestSendControllerTest {
         verify(eventPublisher).publishEvent(any<GraphMailEmailSentEvent>())
     }
 
+    @Test fun `masks senderMailbox in the published GraphMailEmailSentEvent`() {
+        // Regression test: the plugin-action send path already masks senderMailbox in both its
+        // success and failure events (see GraphMailPlugin.sendEmail); the test-send controller
+        // published the raw address here, leaking PII to any GraphMailEmailSentEvent listener.
+        stubPlugin()
+        val captor = argumentCaptor<GraphMailEmailSentEvent>()
+        send()
+        verify(eventPublisher).publishEvent(captor.capture())
+        assertFalse(captor.firstValue.senderMailbox.contains(VALID_SENDER))
+        assertTrue(captor.firstValue.senderMailbox.contains("***"))
+    }
+
     @Test fun `rate limits same user within 10 seconds`() {
         stubPlugin()
         send() // first call succeeds

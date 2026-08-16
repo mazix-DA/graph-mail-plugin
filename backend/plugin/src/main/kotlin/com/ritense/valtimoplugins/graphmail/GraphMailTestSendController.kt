@@ -132,7 +132,7 @@ class GraphMailTestSendController(
             logger.info("Test send successful — recipient: {}", maskEmail(request.recipient))
             eventPublisher.publishEvent(
                 GraphMailEmailSentEvent(
-                    senderMailbox = testSender,
+                    senderMailbox = maskEmail(testSender),
                     recipientCount = 1,
                     ccCount = 0,
                     bccCount = 0,
