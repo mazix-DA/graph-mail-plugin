@@ -181,6 +181,31 @@ class GraphMailTestSendControllerTest {
         assertEquals(429, secondResponse.body!!.statusCode)
     }
 
+    @Test fun `interpolates the sender address into the test mail body footer`() {
+        // Regression test: the footer previously used the escape sequence ${'$'}escapedSender
+        // instead of plain interpolation, which put the literal text "$escapedSender" in the
+        // outgoing HTML instead of the actual sender address.
+        stubPlugin()
+        val captor = argumentCaptor<String>()
+        send()
+        verify(mailClient).sendMail(
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            captor.capture(),
+            any(),
+            any(),
+        )
+        assert(captor.firstValue.contains(VALID_SENDER))
+        assert(!captor.firstValue.contains("\$escapedSender"))
+    }
+
     @Test fun `passes decrypted credentials from plugin instance to mailClient`() {
         stubPlugin()
         send()
