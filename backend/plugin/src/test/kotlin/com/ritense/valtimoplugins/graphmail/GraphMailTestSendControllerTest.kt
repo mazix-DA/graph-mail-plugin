@@ -205,24 +205,11 @@ class GraphMailTestSendControllerTest {
         // instead of plain interpolation, which put the literal text "$escapedSender" in the
         // outgoing HTML instead of the actual sender address.
         stubPlugin()
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(captor.firstValue.contains(VALID_SENDER))
-        assert(!captor.firstValue.contains("\$escapedSender"))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(captor.firstValue.bodyHtml.contains(VALID_SENDER))
+        assert(!captor.firstValue.bodyHtml.contains("\$escapedSender"))
     }
 
     @Test fun `passes decrypted credentials from plugin instance to mailClient`() {
