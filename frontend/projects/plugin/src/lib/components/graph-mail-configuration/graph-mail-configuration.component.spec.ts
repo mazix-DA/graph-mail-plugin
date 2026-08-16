@@ -1,4 +1,5 @@
 import {HttpClient} from '@angular/common/http';
+import {ConfigService} from '@valtimo/shared';
 import {of} from 'rxjs';
 import {GraphMailPluginConfigurationComponent} from './graph-mail-configuration.component';
 import {GraphMailPluginConfig} from '../../models';
@@ -8,6 +9,7 @@ import {GraphMailPluginConfig} from '../../models';
 // and avoids standing up Angular's DI/compiler machinery for logic-only assertions.
 describe('GraphMailPluginConfigurationComponent', () => {
   let httpSpy: jasmine.SpyObj<HttpClient>;
+  let configServiceStub: Pick<ConfigService, 'config'>;
   let component: GraphMailPluginConfigurationComponent;
 
   const baseFormValue: GraphMailPluginConfig = {
@@ -21,7 +23,8 @@ describe('GraphMailPluginConfigurationComponent', () => {
 
   beforeEach(() => {
     httpSpy = jasmine.createSpyObj<HttpClient>('HttpClient', ['get', 'post']);
-    component = new GraphMailPluginConfigurationComponent(httpSpy);
+    configServiceStub = {config: {valtimoApi: {endpointUri: '/api/'}} as any};
+    component = new GraphMailPluginConfigurationComponent(httpSpy, configServiceStub as ConfigService);
     component.pluginId = 'entra';
   });
 
@@ -109,7 +112,28 @@ describe('GraphMailPluginConfigurationComponent', () => {
     expect(httpSpy.post).not.toHaveBeenCalled();
   });
 
-  // ── ngOnInit: configuration resolution against /api/v1/plugin/configuration ────────────
+  // Regression coverage: the URL used to be hardcoded as '/api/v1/plugin/entra/test-send',
+  // which silently breaks when frontend and backend are served from different origins.
+  // Every first-party Valtimo plugin builds its API URLs from ConfigService instead.
+  it('builds the test-send URL from ConfigService.config.valtimoApi.endpointUri', () => {
+    configServiceStub.config.valtimoApi.endpointUri = 'https://backend.example.com/api/';
+    httpSpy.post.and.returnValue(of({success: true, message: 'ok', statusCode: 202}));
+    component.savedConfigurationId = '33333333-3333-3333-3333-333333333333';
+    component.configurationAmbiguous = false;
+    (component as any).testSectionVisible = true;
+    component.testSenderMailbox = 'noreply@gemeente.nl';
+    component.testRecipient = 'burger@example.com';
+    (component as any).formValue$.next(baseFormValue);
+
+    component.sendTestEmail();
+
+    expect(httpSpy.post).toHaveBeenCalledWith(
+      'https://backend.example.com/api/v1/plugin/entra/test-send',
+      jasmine.any(Object),
+    );
+  });
+
+  // ── ngOnInit: configuration resolution against Valtimo's plugin configuration API ──────
 
   it('marks the configuration ambiguous when multiple matches exist and none matches by title', done => {
     httpSpy.get.and.returnValue(of([

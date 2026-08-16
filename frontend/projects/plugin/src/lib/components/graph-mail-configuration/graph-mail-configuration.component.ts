@@ -4,6 +4,7 @@ import {FormsModule} from '@angular/forms';
 import {HttpClient} from '@angular/common/http';
 import {PluginConfigurationComponent, PluginTranslatePipeModule} from '@valtimo/plugin';
 import {FormModule, InputModule} from '@valtimo/components';
+import {ConfigService} from '@valtimo/shared';
 import {BehaviorSubject, combineLatest, Observable, of, Subscription, take} from 'rxjs';
 import {catchError, filter, map, switchMap} from 'rxjs/operators';
 import {GraphMailPluginConfig} from '../../models';
@@ -75,7 +76,17 @@ export class GraphMailPluginConfigurationComponent
   private static readonly UUID_RE =
     /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-  constructor(private readonly http: HttpClient) {}
+  // Every first-party Valtimo plugin configuration component builds API URLs from
+  // ConfigService.config.valtimoApi.endpointUri rather than hardcoding '/api/...' — this
+  // keeps the plugin working when frontend and backend are served from different origins.
+  constructor(
+    private readonly http: HttpClient,
+    private readonly configService: ConfigService,
+  ) {}
+
+  private get apiUrl(): string {
+    return this.configService.config.valtimoApi.endpointUri;
+  }
 
   ngOnInit(): void {
     this.saveSubscription = this.save$?.subscribe(() => {
@@ -115,7 +126,7 @@ export class GraphMailPluginConfigurationComponent
             // 2. Fallback: GET /api/v1/plugin/configuration and match by pluginId / title.
             // URL-based UUID extraction was removed — it is too fragile when the URL contains
             // multiple UUIDs (case IDs, document IDs, etc.) and could select the wrong config.
-            return this.http.get<any[]>('/api/v1/plugin/configuration').pipe(
+            return this.http.get<any[]>(`${this.apiUrl}v1/plugin/configuration`).pipe(
               map(configs => {
                 const allForPlugin = configs.filter(c =>
                   c.pluginDefinitionKey === this.pluginId ||
@@ -255,7 +266,7 @@ export class GraphMailPluginConfigurationComponent
 
     this.testEmailSubscription?.unsubscribe();
     this.testEmailSubscription = this.http
-      .post<TestSendStatus>('/api/v1/plugin/entra/test-send', {
+      .post<TestSendStatus>(`${this.apiUrl}v1/plugin/entra/test-send`, {
         pluginConfigurationId: this.savedConfigurationId,
         recipient: this.testRecipient,
         senderMailbox: this.testSenderMailbox,
