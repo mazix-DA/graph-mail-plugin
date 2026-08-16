@@ -71,7 +71,11 @@ class GraphMailClientImpl(
         val token: String,
         val expiresAt: Instant,
         val createdAt: Instant,
-    )
+    ) {
+        // Same reasoning as TokenResponse.toString() in GraphMailModels.kt — this holds a live
+        // bearer token; never let a default toString() print it in a log line or assertion.
+        override fun toString(): String = "CachedToken(token=***, expiresAt=$expiresAt, createdAt=$createdAt)"
+    }
 
     private val tokenCache = ConcurrentHashMap<String, CachedToken>()
     private val keyLocks = ConcurrentHashMap<String, ReentrantLock>()
