@@ -102,6 +102,14 @@ class GraphMailClientTest {
     @AfterEach
     fun tearDown() = wireMock.stop()
 
+    // ── Credentials ────────────────────────────────────────────────────────
+
+    @Test fun `GraphCredentials toString never includes the clientSecret`() {
+        val text = GraphCredentials("t", "c", "super-secret-value").toString()
+        assertFalse(text.contains("super-secret-value"))
+        assertTrue(text.contains("***"))
+    }
+
     // ── Token ──────────────────────────────────────────────────────────────
 
     @Test fun `fetches token`() {
