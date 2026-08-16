@@ -21,6 +21,11 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 - Bug gefixt in de test-mail footer: door een verkeerd gebruikte escape-sequence (`${'$'}escapedSender`
   in plaats van gewone interpolatie) toonde elke testmail letterlijk de tekst `$escapedSender` in
   plaats van het daadwerkelijk gebruikte afzenderadres.
+- Beveiligingsfix in de gedeelde token-cache: de cache-key bestond alleen uit `tenantId:clientId`,
+  waardoor een pluginconfiguratie met een verkeerd of verouderd `clientSecret` een token kon
+  hergebruiken dat een andere, correcte configuratie voor dezelfde tenant/client al had opgehaald
+  en gecachet — zonder dat het secret opnieuw bij Azure Entra werd geverifieerd. De cache-key bevat
+  nu een hash van het `clientSecret`, zodat een ander secret altijd een cache-miss geeft.
 
 ## 1.0.1
 Correcties in de documentatie en kleine verbeteringen in de plugin.

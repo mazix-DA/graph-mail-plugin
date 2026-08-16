@@ -10,6 +10,7 @@ import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.util.UriComponentsBuilder
 import java.net.URI
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -59,17 +60,35 @@ class GraphMailClientImpl(
 ) : GraphMailClient {
     private val logger = LoggerFactory.getLogger(GraphMailClientImpl::class.java)
 
+    // A hash of clientSecret is part of the cache key — not just tenantId+clientId — so a
+    // plugin configuration with a wrong or stale secret can never ride on a token that a
+    // *different* (correct) secret already fetched and cached for the same tenant/client.
+    // Without this, tenantId+clientId (not marked `secret` on the plugin property, so visible
+    // in the admin UI) would be enough to obtain a working token via the shared cache without
+    // Azure Entra ever validating the caller's actual secret.
+    private fun cachePrefix(
+        tenantId: String,
+        clientId: String,
+    ) = "$tenantId:$clientId:"
+
     private fun cacheKey(
         tenantId: String,
         clientId: String,
-    ) = "$tenantId:$clientId"
+        clientSecret: String,
+    ) = "${cachePrefix(tenantId, clientId)}${sha256(clientSecret)}"
+
+    private fun sha256(value: String): String =
+        MessageDigest
+            .getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     internal fun getAccessToken(credentials: GraphCredentials): String {
         require(credentials.tenantId.isNotBlank()) { "tenantId must not be blank" }
         require(credentials.clientId.isNotBlank()) { "clientId must not be blank" }
         require(credentials.clientSecret.isNotBlank()) { "clientSecret must not be blank" }
 
-        val key = cacheKey(credentials.tenantId, credentials.clientId)
+        val key = cacheKey(credentials.tenantId, credentials.clientId, credentials.clientSecret)
         return tokenCache.getOrFetch(key) { fetchToken(credentials) }
     }
 
@@ -79,8 +98,11 @@ class GraphMailClientImpl(
     ) {
         when {
             tenantId != null && clientId != null -> {
-                val removed = tokenCache.invalidate(cacheKey(tenantId, clientId))
-                if (removed) logger.warn("Token cache cleared for [{}:***]", tenantId)
+                // The secret isn't known here (this is the public invalidate-by-selector API),
+                // so drop every cached entry for this tenant/client regardless of which secret
+                // variant fetched it.
+                val removed = tokenCache.invalidateByPrefix(cachePrefix(tenantId, clientId))
+                if (removed > 0) logger.warn("Token cache cleared ({} entries) for [{}:***]", removed, tenantId)
             }
             tenantId == null && clientId == null -> {
                 val count = tokenCache.invalidateAll()
