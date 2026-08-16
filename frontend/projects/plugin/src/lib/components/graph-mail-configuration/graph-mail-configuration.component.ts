@@ -56,10 +56,15 @@ export class GraphMailPluginConfigurationComponent
   // Inline validation flags
   tenantIdInvalid = false;
   clientIdInvalid = false;
+  allowedSendersInvalid = false;
 
   // Aligned with the backend EMAIL_REGEX in GraphMailValidation.kt — keep in sync.
   private static readonly EMAIL_RE =
     /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$/;
+
+  // Allowlist entry: a full email address or a domain entry such as '@gemeente.nl'.
+  private static readonly DOMAIN_ENTRY_RE =
+    /^@[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$/;
 
   // Azure Tenant IDs and Client IDs are always GUIDs.
   private static readonly UUID_RE =
@@ -150,8 +155,25 @@ export class GraphMailPluginConfigurationComponent
       formValue.clientId &&
       !GraphMailPluginConfigurationComponent.UUID_RE.test(formValue.clientId)
     );
+    this.allowedSendersInvalid = !!(
+      formValue.allowedSenders &&
+      !GraphMailPluginConfigurationComponent.isValidAllowlist(formValue.allowedSenders)
+    );
 
     this.updateValidAndVisibility(formValue);
+  }
+
+  // Every comma-separated entry must be a full email address or an '@domain' entry.
+  private static isValidAllowlist(value: string): boolean {
+    const entries = value.split(',').map(entry => entry.trim()).filter(entry => !!entry);
+    return (
+      entries.length > 0 &&
+      entries.every(
+        entry =>
+          GraphMailPluginConfigurationComponent.EMAIL_RE.test(entry) ||
+          GraphMailPluginConfigurationComponent.DOMAIN_ENTRY_RE.test(entry)
+      )
+    );
   }
 
   // Called when the password input changes so validity re-evaluates without a v-form event.
@@ -172,6 +194,8 @@ export class GraphMailPluginConfigurationComponent
       !this.tenantIdInvalid &&
       formValue.clientId &&
       !this.clientIdInvalid &&
+      formValue.allowedSenders &&
+      !this.allowedSendersInvalid &&
       secretValid
     );
     this.valid$.next(valid);
