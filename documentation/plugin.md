@@ -12,6 +12,8 @@ Een **Azure App Registration** met de volgende instellingen:
 
 > **Least privilege:** ken `Mail.ReadWrite` alleen toe als je daadwerkelijk bijlagen groter dan 2 MiB verstuurt. Voor e-mails zonder bijlagen of met bijlagen tot 2 MiB is `Mail.Send` voldoende. `Mail.ReadWrite` als application permission geeft de app lees-, wijzig- en verwijderrechten op *alle* mailboxen in de tenant — laat deze machtiging weg waar mogelijk. Zonder `Mail.ReadWrite` mislukt het versturen van bijlagen groter dan 2 MiB met een 403-fout.
 
+> **Beheerdersconsent vereist:** `Mail.Send` en `Mail.ReadWrite` zijn *applicatiemachtigingen* (niet delegated). Deze kunnen in Microsoft Entra ID niet door een gewone gebruiker worden toegekend — een tenant-/Entra-beheerder moet de machtigingen verlenen én er admin consent voor geven. Stem dit dus af met de beheerder van je organisatie voordat de plugin in gebruik wordt genomen. Ken alleen de strikt benodigde machtigingen toe (`Mail.Send`, en `Mail.ReadWrite` uitsluitend als je bijlagen groter dan 2 MiB verstuurt).
+
 ### Beperk de app registration tot functionele mailboxen (sterk aanbevolen)
 
 De application permissions `Mail.Send` en `Mail.ReadWrite` gelden standaard **tenantbreed**: iedereen die het client secret bezit kan als élke gebruiker in de tenant mailen. Beperk de app registration daarom aan de Exchange Online-kant tot uitsluitend de functionele mailboxen die de plugin gebruikt, via een **Application Access Policy**:
@@ -137,6 +139,8 @@ operaton:
 ```
 
 Bij minder dan 20 threads loop je een reëel risico op een vastgelopen job-executor onder normale productielast. De plugin logt een waarschuwing bij opstarten als herinnering.
+
+> **Let op (queue-size):** bij een thread-pool-executor worden threads bóven `core-pool-size` pas aangemaakt wanneer de wachtrij vol is. Staat `queue-size` hoog, dan blijft de pool in de praktijk op `core-pool-size` steken en doet `max-pool-size` niets. Houd `queue-size` daarom klein als je op de extra threads wilt kunnen leunen, en stem het totale aantal threads af op de database-connectiepool (meer werkers betekent meer gelijktijdige verbindingen).
 
 ## Test-send
 
