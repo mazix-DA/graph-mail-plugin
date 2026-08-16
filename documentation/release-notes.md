@@ -2,6 +2,20 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.5
+Laatste ronde van de grondige security-analyse: dependency-hygiëne en verdere secret-maskering.
+- `jsoup` opgehoogd van 1.17.2 naar 1.23.1. 1.17.2 valt binnen het kwetsbare bereik van
+  CVE-2026-71497 (Cleaner XSS-bypass via een misvormde tagnaam die eindigt op een controlekarakter,
+  alleen uitbuitbaar bij een custom Safelist die raw-text-elementen toestaat). De `EMAIL_HTML_SAFELIST`
+  van deze plugin voegt geen raw-text-elementen toe en was dus niet daadwerkelijk kwetsbaar, maar
+  aangezien dit de bibliotheek is waar de HTML-sanitisatie van de plugin op leunt, is defensief
+  opgehoogd naar de gepatchte versie.
+- `TokenResponse` en `GraphTokenCache`'s interne `CachedToken` hadden geen eigen `toString()`,
+  waardoor Kotlin's automatisch gegenereerde versie het Graph API access-token in cleartext zou
+  tonen zodra een van beide objecten ooit gelogd of geprint werd. Dezelfde klasse kwetsbaarheid als
+  eerder gefixt voor `GraphCredentials` (1.0.3), maar dan voor het token zelf — een direct bruikbaar
+  credential voor de volledige geldigheidsduur van de token. `toString()` maskeert het token nu altijd.
+
 ## 1.0.4
 Beveiligingshardening van de CI/CD-pipeline en een betrouwbaarheidsfix in de test-send endpoint.
 - De GitHub Actions workflows `publish-backend.yaml` en `publish-frontend.yaml` interpoleerden
