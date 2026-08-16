@@ -97,6 +97,9 @@ class GraphMailPlugin(
     private val objectMapper: ObjectMapper,
     private val resourceStorageService: TemporaryResourceStorageService,
     private val eventPublisher: ApplicationEventPublisher,
+    // Shared across all plugin instances by GraphMailAutoConfiguration/GraphMailPluginFactory —
+    // see GraphTokenCache's class doc for why this must be injected rather than built per instance.
+    private val graphTokenCache: GraphTokenCache = GraphTokenCache(),
 ) {
     // Only set by the internal test constructor — overrides the lazy-built client.
     private var clientOverride: GraphMailClient? = null
@@ -113,7 +116,7 @@ class GraphMailPlugin(
                     .build()
             rt.messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
             rt.messageConverters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
-            GraphMailClientImpl(RestClient.create(rt), tokenBaseUrl, graphBaseUrl)
+            GraphMailClientImpl(RestClient.create(rt), tokenBaseUrl, graphBaseUrl, graphTokenCache)
         }
     }
 
@@ -238,18 +241,19 @@ class GraphMailPlugin(
         val auditStart = System.currentTimeMillis()
         try {
             client.sendMail(
-                tenantId = tenantId,
-                clientId = clientId,
-                clientSecret = clientSecret,
-                senderMailbox = senderMailbox,
-                toRecipients = toRecipients,
-                ccRecipients = ccRecipients,
-                bccRecipients = bccRecipients,
-                replyToRecipients = replyToRecipients,
-                subject = subject,
-                bodyHtml = safeBodyHtml,
-                attachments = attachments,
-                saveToSentItems = true,
+                credentials = GraphCredentials(tenantId = tenantId, clientId = clientId, clientSecret = clientSecret),
+                mail =
+                    OutboundMail(
+                        senderMailbox = senderMailbox,
+                        toRecipients = toRecipients,
+                        ccRecipients = ccRecipients,
+                        bccRecipients = bccRecipients,
+                        replyToRecipients = replyToRecipients,
+                        subject = subject,
+                        bodyHtml = safeBodyHtml,
+                        attachments = attachments,
+                        saveToSentItems = true,
+                    ),
             )
             val durationMs = System.currentTimeMillis() - auditStart
             auditLogger.info(

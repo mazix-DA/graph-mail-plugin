@@ -63,21 +63,7 @@ class GraphMailPluginTest {
         attachments: String? = null,
     ) = plugin.sendEmail(execution, mailbox, to, cc, bcc, replyTo, subject, body, attachments)
 
-    private fun verifySend() =
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-        )
+    private fun verifySend() = verify(mailClient).sendMail(any(), any())
 
     private fun mockBodyHtml(html: String) {
         whenever(storage.getResourceContentAsInputStream(VALID_CONTENT_UUID))
@@ -87,47 +73,19 @@ class GraphMailPluginTest {
     // ── Sender mailbox ───────────────────────────────────────────────────────
 
     @Test fun `uses provided senderMailbox`() {
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send(mailbox = "afdeling@test.nl")
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-        )
-        assertEquals("afdeling@test.nl", captor.firstValue)
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals("afdeling@test.nl", captor.firstValue.senderMailbox)
     }
 
     @Test fun `passes credentials to mailClient`() {
-        val tenant = argumentCaptor<String>()
-        val client = argumentCaptor<String>()
-        val secret = argumentCaptor<String>()
+        val captor = argumentCaptor<GraphCredentials>()
         send()
-        verify(mailClient).sendMail(
-            tenant.capture(),
-            client.capture(),
-            secret.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-        )
-        assertEquals("test-tenant", tenant.firstValue)
-        assertEquals("test-client", client.firstValue)
-        assertEquals("test-secret", secret.firstValue)
+        verify(mailClient).sendMail(captor.capture(), any())
+        assertEquals("test-tenant", captor.firstValue.tenantId)
+        assertEquals("test-client", captor.firstValue.clientId)
+        assertEquals("test-secret", captor.firstValue.clientSecret)
     }
 
     @Test fun `rejects invalid sender mailbox`() {
@@ -185,108 +143,43 @@ class GraphMailPluginTest {
 
     @Test fun `strips script tags from body content`() {
         mockBodyHtml("<p>Hello</p><script>alert('xss')</script>")
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(!captor.firstValue.contains("<script", ignoreCase = true))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(!captor.firstValue.bodyHtml.contains("<script", ignoreCase = true))
     }
 
     @Test fun `strips iframe and object tags`() {
         mockBodyHtml("""<p>ok</p><iframe src="evil"></iframe><object data="x"></object>""")
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(!captor.firstValue.contains("<iframe", ignoreCase = true))
-        assert(!captor.firstValue.contains("<object", ignoreCase = true))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(!captor.firstValue.bodyHtml.contains("<iframe", ignoreCase = true))
+        assert(!captor.firstValue.bodyHtml.contains("<object", ignoreCase = true))
     }
 
     @Test fun `neutralises javascript protocol in href`() {
         mockBodyHtml("""<p><a href="javascript:alert(1)">click</a></p>""")
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(!captor.firstValue.contains("javascript:", ignoreCase = true))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(!captor.firstValue.bodyHtml.contains("javascript:", ignoreCase = true))
     }
 
     @Test fun `strips inline event handlers without leading whitespace`() {
         mockBodyHtml("""<p><img src="x"onerror="alert(1)" /></p>""")
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(!captor.firstValue.contains("onerror", ignoreCase = true))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(!captor.firstValue.bodyHtml.contains("onerror", ignoreCase = true))
     }
 
     @Test fun `preserves legitimate inline style attributes`() {
         mockBodyHtml("""<p style="color:red">text</p>""")
-        val captor = argumentCaptor<String>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-        )
-        assert(captor.firstValue.contains("style=", ignoreCase = true))
+        verify(mailClient).sendMail(any(), captor.capture())
+        assert(captor.firstValue.bodyHtml.contains("style=", ignoreCase = true))
     }
 
     @Test fun `rejects blank body content`() {
@@ -355,65 +248,34 @@ class GraphMailPluginTest {
     // ── Recipient list handling ───────────────────────────────────────────────────
 
     @Test fun `passes multiple recipients to mailClient`() {
-        val captor = argumentCaptor<List<GraphRecipient>>()
+        val captor = argumentCaptor<OutboundMail>()
         send(to = "a@t.nl,b@t.nl,c@t.nl")
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(3, captor.firstValue.toRecipients.size)
+        assertEquals(
+            "a@t.nl",
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
         )
-        assertEquals(3, captor.firstValue.size)
-        assertEquals("a@t.nl", captor.firstValue[0].emailAddress.address)
     }
 
     @Test fun `ignores blank entries in recipient list`() {
-        val captor = argumentCaptor<List<GraphRecipient>>()
+        val captor = argumentCaptor<OutboundMail>()
         send(to = "a@t.nl,  ,b@t.nl")
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-        )
-        assertEquals(2, captor.firstValue.size)
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(2, captor.firstValue.toRecipients.size)
     }
 
     @Test fun `accepts JSON array string for recipients`() {
-        val captor = argumentCaptor<List<GraphRecipient>>()
+        val captor = argumentCaptor<OutboundMail>()
         send(to = """["a@t.nl","b@t.nl"]""")
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(2, captor.firstValue.toRecipients.size)
+        assertEquals(
+            "a@t.nl",
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
         )
-        assertEquals(2, captor.firstValue.size)
-        assertEquals("a@t.nl", captor.firstValue[0].emailAddress.address)
     }
 
     // ── Attachments ──────────────────────────────────────────────────────────────
@@ -425,44 +287,18 @@ class GraphMailPluginTest {
         whenever(storage.getResourceContentAsInputStream(VALID_UUID))
             .thenReturn(ByteArrayInputStream("data".toByteArray()))
 
-        val captor = argumentCaptor<List<ResolvedAttachment>>()
+        val captor = argumentCaptor<OutboundMail>()
         send(attachments = VALID_UUID)
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-        )
-        assertEquals(1, captor.firstValue.size)
-        assertEquals("doc.pdf", captor.firstValue[0].name)
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(1, captor.firstValue.attachments.size)
+        assertEquals("doc.pdf", captor.firstValue.attachments[0].name)
     }
 
     @Test fun `empty attachments when ids null`() {
-        val captor = argumentCaptor<List<ResolvedAttachment>>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-        )
-        assertEquals(0, captor.firstValue.size)
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(0, captor.firstValue.attachments.size)
     }
 
     @Test fun `accepts attachment up to 25 MB`() {
@@ -499,22 +335,7 @@ class GraphMailPluginTest {
     // ── Error propagation ────────────────────────────────────────────────────────
 
     @Test fun `propagates GraphMailException from mailClient`() {
-        whenever(
-            mailClient.sendMail(
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-            ),
-        ).doThrow(GraphMailException("error"))
+        whenever(mailClient.sendMail(any(), any())).doThrow(GraphMailException("error"))
         assertThrows<GraphMailException> { send() }
     }
 
@@ -528,22 +349,7 @@ class GraphMailPluginTest {
     }
 
     @Test fun `listener exception on failure still re-throws original send exception`() {
-        whenever(
-            mailClient.sendMail(
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-            ),
-        ).doThrow(GraphMailException("send failed"))
+        whenever(mailClient.sendMail(any(), any())).doThrow(GraphMailException("send failed"))
         whenever(eventPublisher.publishEvent(any<GraphMailEmailFailedEvent>()))
             .doThrow(RuntimeException("listener failed"))
         val ex = assertThrows<GraphMailException> { send() }
