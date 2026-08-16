@@ -42,6 +42,11 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
   2025 gecompromitteerd (CVE-2025-30066) om CI-secrets in workflow-logs te dumpen. Gepind op de
   actuele, geverifieerde commit-SHA zodat een toekomstige tag-herpointing niet stilzwijgend andere
   code kan uitvoeren in een pipeline die de Sonatype- en npm-publicatiesecrets gebruikt.
+- De rate-limiter van `/api/v1/plugin/entra/test-send` hield voor elke gebruiker die ooit een
+  testmail heeft verstuurd blijvend een entry aan in een in-memory store die nooit kromp — op een
+  langlopende instantie met veel verschillende admins groeide deze onbegrensd. Verouderde entries
+  (buiten het rate-limit-venster) worden nu periodiek opgeruimd zodra de store een omvangsdrempel
+  overschrijdt.
 
 ## 1.0.1
 Correcties in de documentatie en kleine verbeteringen in de plugin.
