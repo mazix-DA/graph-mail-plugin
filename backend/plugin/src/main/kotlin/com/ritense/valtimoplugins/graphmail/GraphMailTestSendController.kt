@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 private const val RATE_LIMIT_INTERVAL_MS = 10_000L  // max 1 test-send per 10s per user
+private const val RATE_LIMIT_STORE_MAX_ENTRIES = 1_000
 
 @RestController
 @RequestMapping("/api/v1/plugin/entra")
@@ -37,10 +38,20 @@ class GraphMailTestSendController(
     // CAS-based check — atomically read and update in one step.
     private fun isRateLimited(username: String): Boolean {
         val now = System.currentTimeMillis()
+        evictStaleRateLimitEntriesIfNeeded(now)
         val tracker = rateLimitStore.computeIfAbsent(username) { AtomicLong(0) }
         val prev = tracker.get()
         if (now - prev < RATE_LIMIT_INTERVAL_MS) return true
         return !tracker.compareAndSet(prev, now)
+    }
+
+    // rateLimitStore only grows (one entry per distinct username that has ever called
+    // test-send) and never shrinks on its own. Once it gets large, sweep out entries whose
+    // last request already fell outside the rate-limit window — they're not being rate-limited
+    // by anything anymore — so a long-running instance doesn't leak memory one admin at a time.
+    private fun evictStaleRateLimitEntriesIfNeeded(now: Long) {
+        if (rateLimitStore.size < RATE_LIMIT_STORE_MAX_ENTRIES) return
+        rateLimitStore.entries.removeIf { now - it.value.get() > RATE_LIMIT_INTERVAL_MS }
     }
 
     // Admin-only: this endpoint sends real email using production credentials.
