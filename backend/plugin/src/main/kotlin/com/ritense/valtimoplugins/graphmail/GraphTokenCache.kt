@@ -10,7 +10,10 @@ import kotlin.concurrent.withLock
 private const val DEFAULT_MAX_CACHED_TOKENS = 64
 
 /**
- * Thread-safe OAuth2 access-token cache keyed by "tenantId:clientId".
+ * Thread-safe OAuth2 access-token cache. Keys are opaque strings chosen by the caller; see
+ * [GraphMailClientImpl.cacheKey] for the "tenantId:clientId:secretHash" format actually used —
+ * the secret hash is part of the key so a wrong or stale secret can never reuse a token that a
+ * different, correct secret already cached for the same tenant/client.
  *
  * This is registered as a single Spring bean (see [GraphMailAutoConfiguration]) and shared
  * between the [GraphMailClient] used by the plugin action path and the one used by the
@@ -52,7 +55,12 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
         }
     }
 
-    fun invalidate(key: String): Boolean = tokens.remove(key) != null
+    /** Removes every entry whose key starts with [prefix]. Returns the number of entries cleared. */
+    fun invalidateByPrefix(prefix: String): Int {
+        val matching = tokens.keys.filter { it.startsWith(prefix) }
+        matching.forEach { tokens.remove(it) }
+        return matching.size
+    }
 
     /** Returns the number of entries that were cleared. */
     fun invalidateAll(): Int {

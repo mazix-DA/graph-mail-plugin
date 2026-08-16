@@ -2,6 +2,17 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.3
+Beveiligingsfixes in de gedeelde token-cache die in 1.0.2 werd geïntroduceerd.
+- De cache-key voor de gedeelde `GraphTokenCache` bestond alleen uit `tenantId:clientId`, waardoor een
+  pluginconfiguratie met een verkeerd of verouderd `clientSecret` een token kon hergebruiken dat een
+  andere, correcte configuratie voor dezelfde tenant/client al had opgehaald en gecachet — zonder dat
+  het secret opnieuw bij Azure Entra werd geverifieerd. De cache-key bevat nu een hash van het
+  `clientSecret`, zodat een ander secret altijd een cache-miss geeft.
+- `GraphCredentials` had geen eigen `toString()`, waardoor Kotlin's automatisch gegenereerde versie het
+  `clientSecret` in cleartext zou tonen zodra het object ooit gelogd of geprint werd (bijv. een
+  debug-logregel of een mislukte testassertion). `toString()` maskeert het secret nu altijd.
+
 ## 1.0.2
 Vervolg op de security-hardening: architectuur- en betrouwbaarheidsverbeteringen.
 - Token-cache verplaatst naar een gedeelde `GraphTokenCache`-bean, zodat caching daadwerkelijk werkt over
