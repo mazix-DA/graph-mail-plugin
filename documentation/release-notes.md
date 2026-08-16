@@ -6,6 +6,11 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 - Publish-pipeline naar Maven Central gefixt: `cn.lalaki.central` werd alleen op het rootproject
   geregistreerd en niet op het `plugin`-subproject, waardoor `publishToCentralPortal` niet bestond
   voor het daadwerkelijk te publiceren artefact.
+- Verplichte `allowedSenders`-whitelist toegevoegd (deny-by-default): elke verzending — ook via
+  proces­data (`pv:`) — wordt geweigerd tenzij `senderMailbox` voorkomt op een kommagescheiden lijst
+  van toegestane volledige adressen en/of `@domain`-entries in de pluginconfiguratie. Geldt ook voor
+  het test-send endpoint. Bestaande pluginconfiguraties weigeren na de upgrade elke verzending totdat
+  de whitelist eenmalig is ingevuld en opgeslagen.
 
 ## 1.0.1
 Correcties in de documentatie en kleine verbeteringen in de plugin.
