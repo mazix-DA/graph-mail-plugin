@@ -12,20 +12,7 @@ package com.ritense.valtimoplugins.graphmail
  */
 interface GraphMailClient {
 
-    fun sendMail(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
-        senderMailbox: String,
-        toRecipients: List<GraphRecipient>,
-        ccRecipients: List<GraphRecipient>,
-        bccRecipients: List<GraphRecipient>,
-        replyToRecipients: List<GraphRecipient>,
-        subject: String,
-        bodyHtml: String,
-        attachments: List<ResolvedAttachment>,
-        saveToSentItems: Boolean,
-    )
+    fun sendMail(credentials: GraphCredentials, mail: OutboundMail)
 
     /**
      * Invalidate the cached token for one tenant/client pair.

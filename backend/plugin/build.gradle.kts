@@ -58,6 +58,7 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa")
     testImplementation("org.springframework.boot:spring-boot-starter-security")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.security:spring-security-test")
     testImplementation("org.mockito:mockito-core")
     testImplementation("org.mockito.kotlin:mockito-kotlin:$mockitoKotlinVersion")
     testImplementation("org.postgresql:postgresql")

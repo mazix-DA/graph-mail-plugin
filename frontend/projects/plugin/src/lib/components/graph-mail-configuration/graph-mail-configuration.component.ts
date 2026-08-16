@@ -40,6 +40,11 @@ export class GraphMailPluginConfigurationComponent
   // UUID van de opgeslagen pluginconfiguratie. Null voor nieuwe (nog niet opgeslagen) configuraties.
   savedConfigurationId: string | null = null;
 
+  // True when multiple configurations for this plugin exist and none can be uniquely
+  // matched by title — sending a test email would silently use the wrong configuration's
+  // credentials, so the test section is blocked with an explicit message instead.
+  configurationAmbiguous = false;
+
   // clientSecret lives outside v-form so we can use a native <input type="password">.
   // The v-input component does not reliably mask password fields.
   clientSecretValue = '';
@@ -104,7 +109,7 @@ export class GraphMailPluginConfigurationComponent
           switchMap((config: any) => {
             // 1. Some Valtimo versions include the id directly in the prefill object.
             if (config?.id) {
-              return of(config.id as string);
+              return of({id: config.id as string, ambiguous: false});
             }
 
             // 2. Fallback: GET /api/v1/plugin/configuration and match by pluginId / title.
@@ -119,21 +124,30 @@ export class GraphMailPluginConfigurationComponent
                 );
 
                 if (allForPlugin.length === 1) {
-                  return (allForPlugin[0].id as string) ?? null;
+                  return {id: (allForPlugin[0].id as string) ?? null, ambiguous: false};
                 }
 
                 const byTitle = allForPlugin.find(c =>
                   c.title === (config as any).configurationTitle ||
                   c.configurationTitle === (config as any).configurationTitle
                 );
-                return (byTitle?.id ?? allForPlugin[0]?.id ?? null) as string | null;
+                if (byTitle?.id) {
+                  return {id: byTitle.id as string, ambiguous: false};
+                }
+
+                // Multiple configurations exist and none matches by title — guessing here
+                // (e.g. picking allForPlugin[0]) risks sending a test email using a *different*
+                // configuration's credentials than the one the admin is looking at. Block
+                // instead of guessing; see graph-mail-configuration.component.spec.ts.
+                return {id: null, ambiguous: allForPlugin.length > 1};
               }),
-              catchError(() => of(null))
+              catchError(() => of({id: null, ambiguous: false}))
             );
           })
         )
-        .subscribe(id => {
+        .subscribe(({id, ambiguous}) => {
           this.savedConfigurationId = id;
+          this.configurationAmbiguous = ambiguous;
         });
     }
   }
@@ -216,6 +230,7 @@ export class GraphMailPluginConfigurationComponent
   get canSendTest(): boolean {
     return (
       !!this.savedConfigurationId &&
+      !this.configurationAmbiguous &&
       this.testSectionVisible &&
       GraphMailPluginConfigurationComponent.EMAIL_RE.test(this.testSenderMailbox) &&
       GraphMailPluginConfigurationComponent.EMAIL_RE.test(this.testRecipient) &&
@@ -233,7 +248,7 @@ export class GraphMailPluginConfigurationComponent
 
   sendTestEmail(): void {
     const form = this.formValue$.getValue();
-    if (!form || !this.canSendTest || !this.savedConfigurationId) return;
+    if (!form || !this.canSendTest || !this.savedConfigurationId || this.configurationAmbiguous) return;
 
     this.testLoading = true;
     this.testStatus = null;

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Java 17+
+- Java 21
 - Node.js >= 20, < 23
 - Valtimo 13.x
 - Azure App Registration met de applicatiemachtigingen:
@@ -28,17 +28,17 @@ the [Custom Plugin Definition](https://docs.valtimo.nl/features/plugins/plugins/
 
 ### Backend
 
-All commands below should be run from the `backend` directory.
+All commands below should be run from the repository root — the Gradle wrapper lives there,
+not in `backend/`.
 
 ```shell
-cd backend
 ./gradlew build
 ```
 
-Tests uitvoeren:
+Tests uitvoeren (vereist Docker voor de test-database):
 
 ```shell
-./gradlew test
+./gradlew :backend:plugin:test
 ```
 
 ### Frontend
@@ -47,6 +47,13 @@ Tests uitvoeren:
 cd frontend
 npm install
 npm run build
+```
+
+De pluginlibrary specifiek bouwen of testen:
+
+```shell
+npx ng build @valtimo-plugins/graph-mail
+npx ng test @valtimo-plugins/graph-mail --watch=false
 ```
 
 ## Installatie in je Valtimo-project

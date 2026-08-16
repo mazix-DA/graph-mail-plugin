@@ -29,6 +29,30 @@ class ResolvedAttachment(
     val sizeBytes: Long get() = rawBytes.size.toLong()
 }
 
+// Azure Entra app registration credentials for OAuth2 Client Credentials — grouped so
+// GraphMailClient callers pass one value instead of three positional strings repeated
+// across the interface, the implementation, and every internal retry/draft-flow method.
+data class GraphCredentials(
+    val tenantId: String,
+    val clientId: String,
+    val clientSecret: String,
+)
+
+// Everything needed to send one email via Graph, grouped for the same reason as
+// [GraphCredentials]. Optional recipient lists and saveToSentItems default so callers only
+// need to name the fields that matter for their call site.
+data class OutboundMail(
+    val senderMailbox: String,
+    val toRecipients: List<GraphRecipient>,
+    val ccRecipients: List<GraphRecipient> = emptyList(),
+    val bccRecipients: List<GraphRecipient> = emptyList(),
+    val replyToRecipients: List<GraphRecipient> = emptyList(),
+    val subject: String,
+    val bodyHtml: String,
+    val attachments: List<ResolvedAttachment> = emptyList(),
+    val saveToSentItems: Boolean = true,
+)
+
 internal data class TokenResponse(
     @JsonProperty("access_token") val accessToken: String,
     @JsonProperty("token_type") val tokenType: String,

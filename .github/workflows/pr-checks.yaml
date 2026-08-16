@@ -45,3 +45,11 @@ jobs:
       - name: Lint
         run: npm run lint
         working-directory: frontend
+
+      - name: Build plugin library
+        run: npx ng build @valtimo-plugins/graph-mail
+        working-directory: frontend
+
+      - name: Test plugin library
+        run: npx ng test @valtimo-plugins/graph-mail --browsers=ChromeHeadlessNoSandbox --watch=false
+        working-directory: frontend
