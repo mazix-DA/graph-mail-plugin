@@ -62,7 +62,12 @@ internal data class TokenResponse(
     @JsonProperty("access_token") val accessToken: String,
     @JsonProperty("token_type") val tokenType: String,
     @JsonProperty("expires_in") val expiresIn: Int,
-)
+) {
+    // accessToken is a live, directly usable bearer credential for the token's full lifetime.
+    // Kotlin's generated toString() would print it in plaintext if this object ever reached
+    // a debug log line or a failed assertion.
+    override fun toString(): String = "TokenResponse(accessToken=***, tokenType=$tokenType, expiresIn=$expiresIn)"
+}
 
 data class SendMailRequest(
     @JsonProperty("message") val message: GraphMessage,
