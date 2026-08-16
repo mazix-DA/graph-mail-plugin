@@ -26,6 +26,11 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
   hergebruiken dat een andere, correcte configuratie voor dezelfde tenant/client al had opgehaald
   en gecachet — zonder dat het secret opnieuw bij Azure Entra werd geverifieerd. De cache-key bevat
   nu een hash van het `clientSecret`, zodat een ander secret altijd een cache-miss geeft.
+- `GraphCredentials` had geen eigen `toString()`, waardoor Kotlin's automatisch gegenereerde versie
+  het `clientSecret` in cleartext zou tonen zodra het object ooit gelogd of geprint werd (bijv. een
+  debug-logregel of een mislukte testassertion). `toString()` maskeert het secret nu altijd.
+- Afzenderadres gemaskeerd in het `GraphMailEmailSentEvent` dat het test-send endpoint publiceert
+  — was hier per ongeluk nog ongemaskeerd, terwijl de reguliere verzendactie dit al consequent deed.
 
 ## 1.0.1
 Correcties in de documentatie en kleine verbeteringen in de plugin.
