@@ -14,9 +14,6 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 import kotlin.random.Random
 
 private const val GRAPH_SCOPE = "https://graph.microsoft.com/.default"
@@ -38,10 +35,6 @@ private const val MAX_SEND_WALL_CLOCK_MS = 30_000L
 private const val MAX_DRAFT_SEND_WALL_CLOCK_MS = 120_000L
 private const val CHUNK_MAX_RETRIES = 3
 
-// Default token cache capacity — override via constructor parameter.
-// Increase if the deployment manages more than 64 distinct Entra app registrations.
-private const val DEFAULT_MAX_CACHED_TOKENS = 64
-
 // NOTE (threading): retry backoff uses Thread.sleep(), which blocks the calling thread.
 // In Operaton BPM (V13), SERVICE_TASK actions run on the job-executor thread pool.
 // Worst case: 429 with Retry-After=15s × 5 attempts = 75s; wall-clock caps enforce the hard limit.
@@ -51,9 +44,8 @@ private const val DEFAULT_MAX_CACHED_TOKENS = 64
 /**
  * Implementation of [GraphMailClient].
  *
- * - OAuth2 Client Credentials, per-(tenantId+clientId) cache
- * - ConcurrentHashMap cache + per-key ReentrantLock — cache hits never block,
- *   concurrent misses for the same key collapse into a single Azure call
+ * - OAuth2 Client Credentials, per-(tenantId+clientId) cache via the shared [GraphTokenCache]
+ *   (see that class for why the cache must be injected rather than owned by this instance)
  * - Exponential backoff with jitter on send (5 attempts) and on token fetch (3)
  * - 429 honours Retry-After (capped at 15s to limit job-executor thread blocking)
  * - 401 invalidates only the affected key, then retries exactly once
@@ -63,65 +55,22 @@ class GraphMailClientImpl(
     private val restClient: RestClient,
     private val tokenBaseUrl: String = "https://login.microsoftonline.com",
     private val graphBaseUrl: String = "https://graph.microsoft.com",
-    private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKENS,
+    private val tokenCache: GraphTokenCache = GraphTokenCache(),
 ) : GraphMailClient {
     private val logger = LoggerFactory.getLogger(GraphMailClientImpl::class.java)
-
-    private data class CachedToken(
-        val token: String,
-        val expiresAt: Instant,
-        val createdAt: Instant,
-    )
-
-    private val tokenCache = ConcurrentHashMap<String, CachedToken>()
-    private val keyLocks = ConcurrentHashMap<String, ReentrantLock>()
 
     private fun cacheKey(
         tenantId: String,
         clientId: String,
     ) = "$tenantId:$clientId"
 
-    private fun lockFor(key: String): ReentrantLock =
-        keyLocks.computeIfAbsent(key) { ReentrantLock() }.also {
-            // Evict lock entries for keys no longer in the token cache so keyLocks doesn't
-            // grow unboundedly when many configurations are created/deleted over time.
-            if (keyLocks.size > maxCachedTokens + maxCachedTokens / 2) {
-                keyLocks.keys
-                    .filter { k -> k != key && !tokenCache.containsKey(k) }
-                    .toList()
-                    .forEach { k -> keyLocks.remove(k) }
-            }
-        }
+    internal fun getAccessToken(credentials: GraphCredentials): String {
+        require(credentials.tenantId.isNotBlank()) { "tenantId must not be blank" }
+        require(credentials.clientId.isNotBlank()) { "clientId must not be blank" }
+        require(credentials.clientSecret.isNotBlank()) { "clientSecret must not be blank" }
 
-    internal fun getAccessToken(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
-    ): String {
-        require(tenantId.isNotBlank()) { "tenantId must not be blank" }
-        require(clientId.isNotBlank()) { "clientId must not be blank" }
-        require(clientSecret.isNotBlank()) { "clientSecret must not be blank" }
-
-        val key = cacheKey(tenantId, clientId)
-
-        // Fast path — non-blocking cache hit.
-        tokenCache[key]?.let { cached ->
-            if (Instant.now().isBefore(cached.expiresAt)) {
-                logger.debug("Token cache hit [{}:***]", tenantId)
-                return cached.token
-            }
-        }
-
-        // Slow path — only requests for the same key serialise.
-        return lockFor(key).withLock {
-            tokenCache[key]?.let { cached ->
-                if (Instant.now().isBefore(cached.expiresAt)) {
-                    logger.debug("Token cache hit (post-lock) [{}:***]", tenantId)
-                    return@withLock cached.token
-                }
-            }
-            fetchAndCacheToken(tenantId, clientId, clientSecret, key)
-        }
+        val key = cacheKey(credentials.tenantId, credentials.clientId)
+        return tokenCache.getOrFetch(key) { fetchToken(credentials) }
     }
 
     override fun invalidateCache(
@@ -130,12 +79,11 @@ class GraphMailClientImpl(
     ) {
         when {
             tenantId != null && clientId != null -> {
-                val removed = tokenCache.remove(cacheKey(tenantId, clientId))
-                if (removed != null) logger.warn("Token cache cleared for [{}:***]", tenantId)
+                val removed = tokenCache.invalidate(cacheKey(tenantId, clientId))
+                if (removed) logger.warn("Token cache cleared for [{}:***]", tenantId)
             }
             tenantId == null && clientId == null -> {
-                val count = tokenCache.size
-                tokenCache.clear()
+                val count = tokenCache.invalidateAll()
                 logger.warn("Token cache fully cleared ({} entries)", count)
             }
             else ->
@@ -147,12 +95,8 @@ class GraphMailClientImpl(
         }
     }
 
-    private fun fetchAndCacheToken(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
-        key: String,
-    ): String {
+    private fun fetchToken(credentials: GraphCredentials): Pair<String, Instant> {
+        val (tenantId, clientId, clientSecret) = credentials
         val url =
             UriComponentsBuilder
                 .fromUriString("$tokenBaseUrl/{tenantId}/oauth2/v2.0/token")
@@ -172,12 +116,10 @@ class GraphMailClientImpl(
 
         // Guard against negative TTL if Azure returns expires_in < buffer.
         val ttl = (response.expiresIn.toLong() - TOKEN_EXPIRY_BUFFER_SECONDS).coerceAtLeast(0L)
-        val now = Instant.now()
-        evictIfFull()
-        tokenCache[key] = CachedToken(response.accessToken, now.plusSeconds(ttl), now)
+        val expiresAt = Instant.now().plusSeconds(ttl)
 
         logger.info("New token acquired [{}:***] — valid for {}s", tenantId, ttl)
-        return response.accessToken
+        return response.accessToken to expiresAt
     }
 
     private fun postTokenWithRetry(
@@ -245,15 +187,6 @@ class GraphMailClientImpl(
         }
     }
 
-    private fun evictIfFull() {
-        if (tokenCache.size < maxCachedTokens) return
-        // Evict the oldest entry by createdAt — bounded scan, only runs at capacity.
-        tokenCache.entries
-            .minByOrNull { it.value.createdAt }
-            ?.key
-            ?.let { tokenCache.remove(it) }
-    }
-
     // Retry-After can be seconds ("120") or an HTTP date ("Wed, 21 Oct 2025 07:28:00 GMT").
     private fun parseRetryAfter(header: String?): Long {
         if (header == null) return 5L
@@ -268,86 +201,44 @@ class GraphMailClientImpl(
     }
 
     override fun sendMail(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
-        senderMailbox: String,
-        toRecipients: List<GraphRecipient>,
-        ccRecipients: List<GraphRecipient>,
-        bccRecipients: List<GraphRecipient>,
-        replyToRecipients: List<GraphRecipient>,
-        subject: String,
-        bodyHtml: String,
-        attachments: List<ResolvedAttachment>,
-        saveToSentItems: Boolean,
+        credentials: GraphCredentials,
+        mail: OutboundMail,
     ) {
-        require(toRecipients.isNotEmpty()) { "At least one recipient is required" }
+        require(mail.toRecipients.isNotEmpty()) { "At least one recipient is required" }
 
-        val recipientCount = toRecipients.size
+        val recipientCount = mail.toRecipients.size
         logger.info(
             "Sending email — recipients: {}, mailbox: '{}'",
             recipientCount,
-            maskEmail(senderMailbox),
+            maskEmail(mail.senderMailbox),
         )
 
         val useDraftFlow =
-            attachments.any { it.sizeBytes > INLINE_ATTACHMENT_THRESHOLD_BYTES } ||
-                attachments.sumOf { it.sizeBytes } > INLINE_ATTACHMENT_THRESHOLD_BYTES
+            mail.attachments.any { it.sizeBytes > INLINE_ATTACHMENT_THRESHOLD_BYTES } ||
+                mail.attachments.sumOf { it.sizeBytes } > INLINE_ATTACHMENT_THRESHOLD_BYTES
 
         if (useDraftFlow) {
             logger.debug(
                 "Using draft+upload flow — {} attachment(s), total {} bytes",
-                attachments.size,
-                attachments.sumOf { it.sizeBytes },
+                mail.attachments.size,
+                mail.attachments.sumOf { it.sizeBytes },
             )
-            sendViaDraftAndUpload(
-                tenantId,
-                clientId,
-                clientSecret,
-                senderMailbox,
-                toRecipients,
-                ccRecipients,
-                bccRecipients,
-                replyToRecipients,
-                subject,
-                bodyHtml,
-                attachments,
-                saveToSentItems,
-            )
+            sendViaDraftAndUpload(credentials, mail)
         } else {
             val sendMailUri: URI =
                 UriComponentsBuilder
                     .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/sendMail")
-                    .buildAndExpand(senderMailbox)
+                    .buildAndExpand(mail.senderMailbox)
                     .toUri()
-            val payload =
-                buildInlinePayload(
-                    subject,
-                    bodyHtml,
-                    toRecipients,
-                    ccRecipients,
-                    bccRecipients,
-                    replyToRecipients,
-                    attachments,
-                    saveToSentItems,
-                )
-            sendWithRefreshAndRetry(tenantId, clientId, clientSecret, sendMailUri, payload, senderMailbox)
+            val payload = buildInlinePayload(mail)
+            sendWithRefreshAndRetry(credentials, sendMailUri, payload, mail.senderMailbox)
         }
         logger.info("Email sent successfully — recipients: {}", recipientCount)
     }
 
-    private fun buildInlinePayload(
-        subject: String,
-        bodyHtml: String,
-        toRecipients: List<GraphRecipient>,
-        ccRecipients: List<GraphRecipient>,
-        bccRecipients: List<GraphRecipient>,
-        replyToRecipients: List<GraphRecipient>,
-        attachments: List<ResolvedAttachment>,
-        saveToSentItems: Boolean,
-    ): SendMailRequest {
+    private fun buildInlinePayload(mail: OutboundMail): SendMailRequest {
         val inlineAttachments =
-            attachments.map { a ->
+            mail.attachments.map { a ->
                 GraphAttachment(
                     name = a.name,
                     contentType = a.contentType,
@@ -357,72 +248,51 @@ class GraphMailClientImpl(
         return SendMailRequest(
             message =
                 GraphMessage(
-                    subject = subject,
-                    body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = bodyHtml),
-                    toRecipients = toRecipients,
-                    ccRecipients = ccRecipients,
-                    bccRecipients = bccRecipients,
-                    replyTo = replyToRecipients,
+                    subject = mail.subject,
+                    body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = mail.bodyHtml),
+                    toRecipients = mail.toRecipients,
+                    ccRecipients = mail.ccRecipients,
+                    bccRecipients = mail.bccRecipients,
+                    replyTo = mail.replyToRecipients,
                     attachments = inlineAttachments,
                 ),
-            saveToSentItems = saveToSentItems,
+            saveToSentItems = mail.saveToSentItems,
         )
     }
 
     private fun sendViaDraftAndUpload(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
-        senderMailbox: String,
-        toRecipients: List<GraphRecipient>,
-        ccRecipients: List<GraphRecipient>,
-        bccRecipients: List<GraphRecipient>,
-        replyToRecipients: List<GraphRecipient>,
-        subject: String,
-        bodyHtml: String,
-        attachments: List<ResolvedAttachment>,
-        saveToSentItems: Boolean,
+        credentials: GraphCredentials,
+        mail: OutboundMail,
     ) {
         val deadline = System.currentTimeMillis() + MAX_DRAFT_SEND_WALL_CLOCK_MS
 
         val draftMessage =
             GraphMessage(
-                subject = subject,
-                body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = bodyHtml),
-                toRecipients = toRecipients,
-                ccRecipients = ccRecipients,
-                bccRecipients = bccRecipients,
-                replyTo = replyToRecipients,
+                subject = mail.subject,
+                body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = mail.bodyHtml),
+                toRecipients = mail.toRecipients,
+                ccRecipients = mail.ccRecipients,
+                bccRecipients = mail.bccRecipients,
+                replyTo = mail.replyToRecipients,
             )
-        val draftId = createDraftWithRetry(tenantId, clientId, clientSecret, senderMailbox, draftMessage, deadline)
+        val draftId = createDraftWithRetry(credentials, mail.senderMailbox, draftMessage, deadline)
         logger.debug("Draft created id={}", draftId)
 
         try {
-            for (attachment in attachments) {
-                val uploadUrl =
-                    createUploadSession(
-                        tenantId,
-                        clientId,
-                        clientSecret,
-                        senderMailbox,
-                        draftId,
-                        attachment,
-                        deadline,
-                    )
+            for (attachment in mail.attachments) {
+                val uploadUrl = createUploadSession(credentials, mail.senderMailbox, draftId, attachment, deadline)
                 uploadInChunks(uploadUrl, attachment, deadline)
                 logger.debug("Attachment uploaded: name='{}' size={}", attachment.name, attachment.sizeBytes)
             }
-            sendDraftWithRetry(tenantId, clientId, clientSecret, senderMailbox, draftId, deadline)
+            sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
         } catch (ex: Exception) {
-            deleteDraftBestEffort(tenantId, clientId, clientSecret, senderMailbox, draftId)
+            deleteDraftBestEffort(credentials, mail.senderMailbox, draftId)
             throw ex
         }
     }
 
     private fun deleteDraftBestEffort(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
+        credentials: GraphCredentials,
         senderMailbox: String,
         draftId: String,
     ) {
@@ -432,7 +302,7 @@ class GraphMailClientImpl(
                     .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}")
                     .buildAndExpand(senderMailbox, draftId)
                     .toUri()
-            val token = getAccessToken(tenantId, clientId, clientSecret)
+            val token = getAccessToken(credentials)
             restClient
                 .delete()
                 .uri(uri)
@@ -446,9 +316,7 @@ class GraphMailClientImpl(
     }
 
     private fun createDraftWithRetry(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
+        credentials: GraphCredentials,
         senderMailbox: String,
         message: GraphMessage,
         deadline: Long,
@@ -468,7 +336,7 @@ class GraphMailClientImpl(
                 throw GraphMailException("Draft creation timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
             }
             attempt++
-            val token = getAccessToken(tenantId, clientId, clientSecret)
+            val token = getAccessToken(credentials)
             try {
                 return restClient
                     .post()
@@ -489,7 +357,7 @@ class GraphMailClientImpl(
                                 ex,
                             )
                         }
-                        invalidateCache(tenantId, clientId)
+                        invalidateCache(credentials.tenantId, credentials.clientId)
                         tokenRefreshed = true
                         attempt--
                     }
@@ -524,9 +392,7 @@ class GraphMailClientImpl(
     }
 
     private fun createUploadSession(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
+        credentials: GraphCredentials,
         senderMailbox: String,
         draftId: String,
         attachment: ResolvedAttachment,
@@ -568,12 +434,12 @@ class GraphMailClientImpl(
 
         val uploadUrl =
             try {
-                doPost(getAccessToken(tenantId, clientId, clientSecret))
+                doPost(getAccessToken(credentials))
             } catch (ex: HttpClientErrorException) {
                 if (ex.statusCode.value() == 401 && !tokenRefreshed) {
                     tokenRefreshed = true
-                    invalidateCache(tenantId, clientId)
-                    doPost(getAccessToken(tenantId, clientId, clientSecret))
+                    invalidateCache(credentials.tenantId, credentials.clientId)
+                    doPost(getAccessToken(credentials))
                 } else {
                     throw GraphMailException(
                         "Graph API rejected upload session creation (${ex.statusCode})",
@@ -687,9 +553,7 @@ class GraphMailClientImpl(
     }
 
     private fun sendDraftWithRetry(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
+        credentials: GraphCredentials,
         senderMailbox: String,
         draftId: String,
         deadline: Long,
@@ -709,7 +573,7 @@ class GraphMailClientImpl(
                 throw GraphMailException("Draft send timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
             }
             attempt++
-            val token = getAccessToken(tenantId, clientId, clientSecret)
+            val token = getAccessToken(credentials)
             try {
                 restClient
                     .post()
@@ -728,7 +592,7 @@ class GraphMailClientImpl(
                                 ex,
                             )
                         }
-                        invalidateCache(tenantId, clientId)
+                        invalidateCache(credentials.tenantId, credentials.clientId)
                         tokenRefreshed = true
                         attempt--
                     }
@@ -763,9 +627,7 @@ class GraphMailClientImpl(
     }
 
     private fun sendWithRefreshAndRetry(
-        tenantId: String,
-        clientId: String,
-        clientSecret: String,
+        credentials: GraphCredentials,
         url: URI,
         payload: SendMailRequest,
         mailbox: String,
@@ -782,7 +644,7 @@ class GraphMailClientImpl(
                 )
             }
             attempt++
-            val token = getAccessToken(tenantId, clientId, clientSecret)
+            val token = getAccessToken(credentials)
             try {
                 restClient
                     .post()
@@ -805,9 +667,9 @@ class GraphMailClientImpl(
                         }
                         logger.warn(
                             "401 Unauthorized — invalidating cached token for [{}:***] and retrying once",
-                            tenantId,
+                            credentials.tenantId,
                         )
-                        invalidateCache(tenantId, clientId)
+                        invalidateCache(credentials.tenantId, credentials.clientId)
                         tokenRefreshed = true
                         attempt-- // Don't burn a retry attempt on the refresh.
                     }

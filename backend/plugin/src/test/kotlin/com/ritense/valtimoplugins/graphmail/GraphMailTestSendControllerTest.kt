@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argThat
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
@@ -70,28 +71,7 @@ class GraphMailTestSendControllerTest {
         request: GraphMailTestSendRequest = GraphMailTestSendRequest(VALID_CONFIG_ID, VALID_RECIPIENT, VALID_SENDER),
     ) = controller.testSend(request, authentication)
 
-    // sendMail signature (12 params):
-    // tenantId(1), clientId(2), clientSecret(3), senderMailbox(4),
-    // toRecipients(5), ccRecipients(6), bccRecipients(7), replyToRecipients(8),
-    // subject(9), bodyHtml(10), attachments(11), saveToSentItems(12)
-
-    private fun stubSendMail() =
-        whenever(
-            mailClient.sendMail(
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-                any(),
-            ),
-        )
+    private fun stubSendMail() = whenever(mailClient.sendMail(any(), any()))
 
     private fun stubPlugin(
         sender: String? = VALID_SENDER,
@@ -249,62 +229,30 @@ class GraphMailTestSendControllerTest {
         stubPlugin()
         send()
         verify(mailClient).sendMail(
-            eq("tenant-id"),
-            eq("client-id"),
-            eq("client-secret"),
-            eq(VALID_SENDER),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
+            eq(GraphCredentials("tenant-id", "client-id", "client-secret")),
+            argThat { senderMailbox == VALID_SENDER },
         )
     }
 
     @Test fun `sends to the recipient from the request`() {
         stubPlugin()
         send()
-        val captor = argumentCaptor<List<GraphRecipient>>()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
+        val captor = argumentCaptor<OutboundMail>()
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertEquals(1, captor.firstValue.toRecipients.size)
+        assertEquals(
+            VALID_RECIPIENT,
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
         )
-        assertEquals(1, captor.firstValue.size)
-        assertEquals(VALID_RECIPIENT, captor.firstValue[0].emailAddress.address)
     }
 
     @Test fun `sends with saveToSentItems false`() {
         stubPlugin()
-        val captor = argumentCaptor<Boolean>()
+        val captor = argumentCaptor<OutboundMail>()
         send()
-        verify(mailClient).sendMail(
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            any(),
-            captor.capture(),
-        )
-        assertFalse(captor.firstValue)
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertFalse(captor.firstValue.saveToSentItems)
     }
 
     // ── Error mapping ──────────────────────────────────────────────────────────────

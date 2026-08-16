@@ -66,20 +66,22 @@ class GraphMailClientTest {
 
     private fun recipients(vararg addresses: String) = addresses.map { GraphRecipient(GraphEmailAddress(address = it)) }
 
+    private fun credentials(
+        tenant: String = tenantId,
+        client: String = clientId,
+        secret: String = clientSecret,
+    ) = GraphCredentials(tenant, client, secret)
+
     private fun sendBasic(saveToSentItems: Boolean = true) =
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("jan@test.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "Test",
-            "<p>Test</p>",
-            emptyList(),
-            saveToSentItems,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("jan@test.nl"),
+                subject = "Test",
+                bodyHtml = "<p>Test</p>",
+                saveToSentItems = saveToSentItems,
+            ),
         )
 
     @BeforeEach
@@ -104,7 +106,7 @@ class GraphMailClientTest {
 
     @Test fun `fetches token`() {
         stubToken()
-        assertEquals(token, client.getAccessToken("t", "c", "s"))
+        assertEquals(token, client.getAccessToken(GraphCredentials("t", "c", "s")))
     }
 
     @Test fun `sends correct credentials`() {
@@ -114,34 +116,34 @@ class GraphMailClientTest {
                 .withRequestBody(containing("client_secret=mysecret"))
                 .willReturn(okJson(tokenJson())),
         )
-        client.getAccessToken("t", "myid", "mysecret")
+        client.getAccessToken(GraphCredentials("t", "myid", "mysecret"))
         wireMock.verify(1, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `caches token on second call`() {
         stubToken()
-        client.getAccessToken("t", "c", "s")
-        client.getAccessToken("t", "c", "s")
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
         wireMock.verify(1, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `fetches new token after cache expiry`() {
         stubToken(exp = 59) // < TOKEN_EXPIRY_BUFFER_SECONDS so each call refreshes
-        client.getAccessToken("t", "c", "s")
-        client.getAccessToken("t", "c", "s")
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
         wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `different tenants use separate cache entries`() {
         stubToken()
-        client.getAccessToken("tenant1", "c", "s")
-        client.getAccessToken("tenant2", "c", "s")
+        client.getAccessToken(GraphCredentials("tenant1", "c", "s"))
+        client.getAccessToken(GraphCredentials("tenant2", "c", "s"))
         wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `throws on 400 token request`() {
         wireMock.stubFor(post(urlPathMatching(tokenPath)).willReturn(aResponse().withStatus(400)))
-        assertThrows(GraphMailException::class.java) { client.getAccessToken("t", "c", "s") }
+        assertThrows(GraphMailException::class.java) { client.getAccessToken(GraphCredentials("t", "c", "s")) }
     }
 
     @Test fun `retries token on 503 then succeeds`() {
@@ -158,33 +160,33 @@ class GraphMailClientTest {
                 .whenScenarioStateIs("ok")
                 .willReturn(okJson(tokenJson())),
         )
-        assertEquals(token, client.getAccessToken("t", "c", "s"))
+        assertEquals(token, client.getAccessToken(GraphCredentials("t", "c", "s")))
         wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `gives up on token after MAX retries on 503`() {
         wireMock.stubFor(post(urlPathMatching(tokenPath)).willReturn(aResponse().withStatus(503)))
-        assertThrows(GraphMailException::class.java) { client.getAccessToken("t", "c", "s") }
+        assertThrows(GraphMailException::class.java) { client.getAccessToken(GraphCredentials("t", "c", "s")) }
     }
 
     @Test fun `invalidateCache key-scoped only clears that key`() {
         stubToken()
-        client.getAccessToken("tenant1", "client1", "s")
-        client.getAccessToken("tenant2", "client2", "s")
+        client.getAccessToken(GraphCredentials("tenant1", "client1", "s"))
+        client.getAccessToken(GraphCredentials("tenant2", "client2", "s"))
         client.invalidateCache("tenant1", "client1")
-        client.getAccessToken("tenant1", "client1", "s")
-        client.getAccessToken("tenant2", "client2", "s")
+        client.getAccessToken(GraphCredentials("tenant1", "client1", "s"))
+        client.getAccessToken(GraphCredentials("tenant2", "client2", "s"))
         // tenant1 fetched twice (initial + post-invalidate); tenant2 fetched once total
         wireMock.verify(3, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
     @Test fun `invalidateCache full flush clears everything`() {
         stubToken()
-        client.getAccessToken("tenant1", "c", "s")
-        client.getAccessToken("tenant2", "c", "s")
+        client.getAccessToken(GraphCredentials("tenant1", "c", "s"))
+        client.getAccessToken(GraphCredentials("tenant2", "c", "s"))
         client.invalidateCache()
-        client.getAccessToken("tenant1", "c", "s")
-        client.getAccessToken("tenant2", "c", "s")
+        client.getAccessToken(GraphCredentials("tenant1", "c", "s"))
+        client.getAccessToken(GraphCredentials("tenant2", "c", "s"))
         wireMock.verify(4, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
@@ -224,18 +226,13 @@ class GraphMailClientTest {
         stubToken()
         wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("a@t.nl", "b@t.nl", "c@t.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "Sub",
-            "<p>B</p>",
-            emptyList(),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("a@t.nl", "b@t.nl", "c@t.nl"),
+                subject = "Sub",
+                bodyHtml = "<p>B</p>",
+            ),
         )
         val body = wireMock.findAll(postRequestedFor(urlPathMatching(mailPath)))[0].bodyAsString
         assertTrue(body.contains(""""address":"a@t.nl""""))
@@ -247,18 +244,15 @@ class GraphMailClientTest {
         stubToken()
         wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("to@t.nl"),
-            recipients("cc@t.nl"),
-            recipients("bcc@t.nl"),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            emptyList(),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("to@t.nl"),
+                ccRecipients = recipients("cc@t.nl"),
+                bccRecipients = recipients("bcc@t.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+            ),
         )
         val body = wireMock.findAll(postRequestedFor(urlPathMatching(mailPath)))[0].bodyAsString
         assertTrue(body.contains(""""ccRecipients"""))
@@ -403,18 +397,13 @@ class GraphMailClientTest {
         stubToken()
         assertThrows(IllegalArgumentException::class.java) {
             client.sendMail(
-                tenantId,
-                clientId,
-                clientSecret,
-                mailbox,
-                emptyList(),
-                emptyList(),
-                emptyList(),
-                emptyList(),
-                "T",
-                "<p>B</p>",
-                emptyList(),
-                true,
+                credentials(),
+                OutboundMail(
+                    senderMailbox = mailbox,
+                    toRecipients = emptyList(),
+                    subject = "T",
+                    bodyHtml = "<p>B</p>",
+                ),
             )
         }
     }
@@ -424,18 +413,13 @@ class GraphMailClientTest {
         wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
         // + sign in mailbox local part should not break the URI
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            "user+tag@test.nl",
-            recipients("jan@t.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            emptyList(),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = "user+tag@test.nl",
+                toRecipients = recipients("jan@t.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+            ),
         )
         val req = wireMock.findAll(postRequestedFor(urlPathMatching(mailPath)))[0]
         assertTrue(
@@ -486,18 +470,14 @@ class GraphMailClientTest {
         wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
         val attachment = resolvedAttachment("small.pdf", INLINE_ATTACHMENT_THRESHOLD_BYTES.toInt())
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("jan@test.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            listOf(attachment),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("jan@test.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+                attachments = listOf(attachment),
+            ),
         )
         wireMock.verify(1, postRequestedFor(urlPathMatching(mailPath)))
         wireMock.verify(0, postRequestedFor(urlPathMatching(draftPath)))
@@ -513,18 +493,14 @@ class GraphMailClientTest {
 
         val attachment = resolvedAttachment("large.bin", (INLINE_ATTACHMENT_THRESHOLD_BYTES + 1).toInt())
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("jan@test.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            listOf(attachment),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("jan@test.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+                attachments = listOf(attachment),
+            ),
         )
 
         wireMock.verify(0, postRequestedFor(urlPathMatching(mailPath)))
@@ -546,18 +522,14 @@ class GraphMailClientTest {
         stubSendDraft()
 
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("jan@test.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            listOf(resolvedAttachment("f.bin", totalSize)),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("jan@test.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+                attachments = listOf(resolvedAttachment("f.bin", totalSize)),
+            ),
         )
 
         val puts = wireMock.findAll(putRequestedFor(anyUrl()))
@@ -581,18 +553,14 @@ class GraphMailClientTest {
                 ).toInt(),
             ),
     ) = client.sendMail(
-        tenantId,
-        clientId,
-        clientSecret,
-        mailbox,
-        recipients("jan@test.nl"),
-        emptyList(),
-        emptyList(),
-        emptyList(),
-        "T",
-        "<p>B</p>",
-        listOf(attachment),
-        true,
+        credentials(),
+        OutboundMail(
+            senderMailbox = mailbox,
+            toRecipients = recipients("jan@test.nl"),
+            subject = "T",
+            bodyHtml = "<p>B</p>",
+            attachments = listOf(attachment),
+        ),
     )
 
     @Test fun `401 on createDraft triggers cache invalidate and retry`() {
@@ -819,18 +787,14 @@ class GraphMailClientTest {
 
         val attachment = resolvedAttachment("f.bin", (INLINE_ATTACHMENT_THRESHOLD_BYTES + 1).toInt())
         client.sendMail(
-            tenantId,
-            clientId,
-            clientSecret,
-            mailbox,
-            recipients("jan@test.nl"),
-            emptyList(),
-            emptyList(),
-            emptyList(),
-            "T",
-            "<p>B</p>",
-            listOf(attachment, attachment),
-            true,
+            credentials(),
+            OutboundMail(
+                senderMailbox = mailbox,
+                toRecipients = recipients("jan@test.nl"),
+                subject = "T",
+                bodyHtml = "<p>B</p>",
+                attachments = listOf(attachment, attachment),
+            ),
         )
 
         wireMock.verify(2, postRequestedFor(urlPathMatching(uploadSessionPath)))

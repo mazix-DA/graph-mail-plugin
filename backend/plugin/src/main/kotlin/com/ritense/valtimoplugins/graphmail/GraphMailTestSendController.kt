@@ -143,18 +143,20 @@ class GraphMailTestSendController(
         val sendStart = System.currentTimeMillis()
         return try {
             graphMailClient.sendMail(
-                tenantId = plugin.tenantId,
-                clientId = plugin.clientId,
-                clientSecret = plugin.clientSecret,
-                senderMailbox = testSender,
-                toRecipients = listOf(GraphRecipient(GraphEmailAddress(address = request.recipient))),
-                ccRecipients = emptyList(),
-                bccRecipients = emptyList(),
-                replyToRecipients = emptyList(),
-                subject = "Testmail — Microsoft Graph Mail Plugin",
-                bodyHtml = buildTestBody(testSender),
-                attachments = emptyList(),
-                saveToSentItems = false,
+                credentials =
+                    GraphCredentials(
+                        tenantId = plugin.tenantId,
+                        clientId = plugin.clientId,
+                        clientSecret = plugin.clientSecret,
+                    ),
+                mail =
+                    OutboundMail(
+                        senderMailbox = testSender,
+                        toRecipients = listOf(GraphRecipient(GraphEmailAddress(address = request.recipient))),
+                        subject = "Testmail — Microsoft Graph Mail Plugin",
+                        bodyHtml = buildTestBody(testSender),
+                        saveToSentItems = false,
+                    ),
             )
             val durationMs = System.currentTimeMillis() - sendStart
             logger.info("Test send successful — recipient: {}", maskEmail(request.recipient))
