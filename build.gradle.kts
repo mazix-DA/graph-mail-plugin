@@ -4,7 +4,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import org.springframework.boot.gradle.tasks.bundling.BootJar
 
-val lalakiCentralVersion: String by project
 val valtimoVersion: String by project
 val ktlintVersion: String by project
 val ktlintToolVersion: String by project
@@ -61,6 +60,7 @@ subprojects {
         apply(plugin = "com.avast.gradle.docker-compose")
         apply(plugin = "maven-publish")
         apply(plugin = "org.jlleitschuh.gradle.ktlint")
+        apply(plugin = "cn.lalaki.central")
 
         java.sourceCompatibility = JavaVersion.VERSION_21
         java.targetCompatibility = JavaVersion.VERSION_21
@@ -75,7 +75,6 @@ subprojects {
         dependencies {
             compileOnly(platform("com.ritense.valtimo:valtimo-dependency-versions:$valtimoVersion"))
             testImplementation(platform("com.ritense.valtimo:valtimo-dependency-versions:$valtimoVersion"))
-            implementation("cn.lalaki.central:central:$lalakiCentralVersion")
         }
 
         allOpen {
