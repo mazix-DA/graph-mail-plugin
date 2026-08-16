@@ -31,7 +31,11 @@ private const val DEFAULT_MAX_CACHED_TOKENS = 64
  */
 class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKENS) {
 
-    private data class CachedToken(val token: String, val expiresAt: Instant, val createdAt: Instant)
+    private data class CachedToken(val token: String, val expiresAt: Instant, val createdAt: Instant) {
+        // Same reasoning as GraphCredentials.toString() in GraphMailModels.kt — this holds a
+        // live bearer token; never let a default toString() print it in a log line or assertion.
+        override fun toString(): String = "CachedToken(token=***, expiresAt=$expiresAt, createdAt=$createdAt)"
+    }
 
     private val tokens = ConcurrentHashMap<String, CachedToken>()
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
