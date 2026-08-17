@@ -28,6 +28,15 @@ jobs:
       - name: Test
         run: ./gradlew :backend:plugin:test
 
+      # Non-blocking for now: `main` itself has pre-existing ktlint violations (ktlint was
+      # configured but never actually enforced in CI here), so a hard gate today would fail
+      # on unrelated code in every PR. This surfaces the check and its trend without blocking
+      # merges. Run `./gradlew :backend:plugin:ktlintFormat` locally once to clear the existing
+      # debt, then drop `continue-on-error` to make this a real gate against new violations.
+      - name: Ktlint (informational — see comment above)
+        run: ./gradlew :backend:plugin:ktlintCheck
+        continue-on-error: true
+
   frontend-lint:
     name: Frontend lint
     runs-on: ubuntu-latest
