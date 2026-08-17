@@ -2,6 +2,8 @@ package com.ritense.valtimoplugins.graphmail
 
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 // Default capacity before stale entries get swept. Sized generously above realistic concurrent
 // in-flight-retry counts — see evictStaleIfNeeded.
@@ -24,6 +26,12 @@ private const val DEFAULT_ENTRY_TTL_MS = 30L * 60L * 1000L // 30 minutes
  * next attempt can see. This guard is intentionally in-memory and non-transactional — that is
  * exactly what makes it survive a transaction rollback that a process variable cannot.
  *
+ * [ifNotAlreadySent] serialises same-key callers on a per-key lock, so [action] is only ever
+ * running for a given key on one thread at a time — a genuine concurrent retry (e.g. an
+ * automatic job-executor retry racing a manual retrigger from an admin console) cannot slip two
+ * sends past a plain check-then-act. [action] is only marked sent once it returns normally, so a
+ * failed attempt never blocks a legitimate next retry from actually sending.
+ *
  * Scope and limitation: this only protects against a retry handled by the *same, still-running*
  * JVM instance — the realistic failure mode (an optimistic-lock retry happens within the same
  * request/thread-pool cycle, typically milliseconds to seconds later). It does NOT survive an
@@ -40,17 +48,68 @@ class SendIdempotencyGuard(
     private val entryTtlMs: Long = DEFAULT_ENTRY_TTL_MS,
 ) {
     private val sentAt = ConcurrentHashMap<String, Instant>()
+    private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
-    /** True if [markSent] was already called for [key] within the last [entryTtlMs]. */
-    fun alreadySent(key: String): Boolean {
+    /**
+     * Cheap, non-locking check for whether [key] was already sent. Safe to use as an early exit
+     * before doing expensive work (resolving attachments, sanitising HTML) that would otherwise
+     * be thrown away on a detected retry — but NOT sufficient on its own to decide whether to
+     * actually send: use [ifNotAlreadySent] for that, which is the atomic, authoritative check.
+     */
+    fun alreadySent(key: String): Boolean = isSent(key)
+
+    /**
+     * Runs [action] for [key] unless it was already sent within the last [entryTtlMs], in which
+     * case [action] is skipped entirely and this returns null. See the class doc for why this is
+     * safe under both a sequential retry and a genuine concurrent race on the same key.
+     */
+    fun <T> ifNotAlreadySent(
+        key: String,
+        action: () -> T,
+    ): T? =
+        lockFor(key).withLock {
+            if (isSent(key)) {
+                null
+            } else {
+                val result = action()
+                markSent(key)
+                result
+            }
+        }
+
+    private fun isSent(key: String): Boolean {
         val at = sentAt[key] ?: return false
         return Instant.now().isBefore(at.plusMillis(entryTtlMs))
     }
 
-    /** Records that the send identified by [key] has completed successfully. */
-    fun markSent(key: String) {
+    private fun markSent(key: String) {
         evictStaleIfNeeded()
         sentAt[key] = Instant.now()
+    }
+
+    private fun lockFor(key: String): ReentrantLock =
+        locks.computeIfAbsent(key) { ReentrantLock() }.also { evictStaleLocksIfNeeded(key) }
+
+    // Mirrors GraphTokenCache.evictStaleLocksIfNeeded: only removes a lock that is provably free
+    // right now (tryLock succeeds) and not backing a currently-sent key — a key whose action is
+    // still running is legitimately lock-held but not yet marked sent, and evicting its lock
+    // would hand a racing second caller a *different* Lock instance for the same key, defeating
+    // the mutual exclusion this class exists to provide.
+    private fun evictStaleLocksIfNeeded(currentKey: String) {
+        if (locks.size <= maxEntries + maxEntries / 2) return
+        locks.keys
+            .filter { it != currentKey && !sentAt.containsKey(it) }
+            .toList()
+            .forEach { k ->
+                val lock = locks[k] ?: return@forEach
+                if (lock.tryLock()) {
+                    try {
+                        if (!sentAt.containsKey(k)) locks.remove(k)
+                    } finally {
+                        lock.unlock()
+                    }
+                }
+            }
     }
 
     // sentAt only grows (one entry per distinct execution+activity that has ever sent). Once it

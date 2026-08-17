@@ -2,6 +2,25 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.7
+Correctie op de `SendIdempotencyGuard` uit 1.0.6: het eerste ontwerp voorkwam een dubbele
+Graph-aanroep, maar had zelf nog een prestatie- en een concurrency-gebrek.
+- **Performance**: de duplicate-check gebeurde pas vlak vóór de daadwerkelijke Graph-aanroep, ná
+  het valideren van het verzoek, het ophalen en saniteren van de e-mailbody en het inlezen van
+  eventuele bijlagen uit tijdelijke opslag. Bij een gedetecteerde retry was al dat werk voor niets
+  gedaan. Er is nu een goedkope, niet-blokkerende check vóór al dat werk, die de meeste retries
+  meteen afvangt.
+- **Concurrency**: de daadwerkelijke check ("is dit al verstuurd?") en het markeren als verstuurd
+  waren twee aparte, niet-atomaire stappen — een reëel race window waarin twee gelijktijdige
+  retries (bijv. een automatische job-executor-retry die een handmatige herstart vanuit een
+  beheerconsole kruist) allebei de eerste check konden doorstaan en dus alsnog beide de e-mail
+  konden versturen. `SendIdempotencyGuard` gebruikt nu een per-sleutel `ReentrantLock`
+  (`ifNotAlreadySent`) — hetzelfde patroon als de bestaande `GraphTokenCache` — zodat de check en
+  het markeren atomisch gebeuren en gelijktijdige aanroepen voor dezelfde executie/activiteit
+  altijd serieel verlopen.
+- Een nieuwe test simuleert deze race met twee threads en een gecontroleerde
+  `CountDownLatch`-vrijgave, en bevestigt dat `sendMail` precies één keer wordt aangeroepen.
+
 ## 1.0.6
 Kwaliteitsverbeteringen naar aanleiding van een codekwaliteitsreview: minder duplicatie in de
 Graph API-retrylogica en een oplossing voor het risico op dubbel verzonden e-mails bij een
