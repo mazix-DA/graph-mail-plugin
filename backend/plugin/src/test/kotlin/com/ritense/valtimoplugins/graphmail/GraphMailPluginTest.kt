@@ -410,10 +410,39 @@ class GraphMailPluginTest {
         verify(mailClient, times(1)).sendMail(any(), any())
     }
 
-    @Test fun `retrying the same activity instance after a successful send still publishes SEND_OK`() {
+    @Test fun `retrying the same activity instance after a successful send does not publish a second event`() {
+        // A skipped duplicate is not a new send — publishing GraphMailEmailSentEvent again would
+        // mislead any listener that counts emails sent.
         send()
         send()
-        verify(eventPublisher, times(2)).publishEvent(any<GraphMailEmailSentEvent>())
+        verify(eventPublisher, times(1)).publishEvent(any<GraphMailEmailSentEvent>())
+    }
+
+    @Test fun `a concurrent duplicate racing the cheap early-exit check still cannot send twice`() {
+        // Simulates the rare race the cheap alreadySent() pre-check can miss: two callers reach
+        // ifNotAlreadySent for the same key at (almost) the same time. The per-key lock inside
+        // SendIdempotencyGuard must serialise them so only one actually calls mailClient.sendMail.
+        val startedLatch = java.util.concurrent.CountDownLatch(1)
+        val releaseLatch = java.util.concurrent.CountDownLatch(1)
+        whenever(mailClient.sendMail(any(), any())).thenAnswer {
+            startedLatch.countDown()
+            releaseLatch.await()
+        }
+        val firstCallerThread = Thread { send() }
+        firstCallerThread.start()
+        startedLatch.await() // first caller is inside sendMail, holding the per-key lock
+
+        // Second caller races in while the first is still in flight (before markSent runs) — on
+        // its own thread, since it legitimately blocks on the per-key lock until the first
+        // caller either fails or marks the key sent.
+        val secondCallerThread = Thread { send() }
+        secondCallerThread.start()
+
+        releaseLatch.countDown()
+        firstCallerThread.join()
+        secondCallerThread.join()
+
+        verify(mailClient, times(1)).sendMail(any(), any())
     }
 
     @Test fun `a different activity instance on the same execution is not treated as a duplicate`() {

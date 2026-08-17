@@ -197,124 +197,148 @@ class GraphMailPlugin(
                 "Add the permitted sender mailboxes (or '@domain' entries) to the Graph Mail plugin configuration"
         }
 
-        // Header injection guard — same fields the frontend already validates,
-        // re-checked server-side for defense in depth.
-        requireNoControlChars(senderMailbox, "senderMailbox")
-        requireNoControlChars(subject, "subject")
-
-        require(isValidEmail(senderMailbox)) { "Invalid sender email: '$senderMailbox'" }
-        require(isSenderAllowed(senderMailbox, allowedSendersList())) {
-            "Sender '$senderMailbox' is not on the 'allowedSenders' allowlist of this plugin configuration"
-        }
-
-        require(subject.isNotBlank()) { "Email subject must not be blank" }
-        require(subject.length <= MAX_SUBJECT_LENGTH) {
-            "Email subject exceeds $MAX_SUBJECT_LENGTH characters (${subject.length})"
-        }
-        require(isValidResourceId(contentId)) { "Invalid contentId: '$contentId' — must not be blank or contain path-traversal sequences" }
-
-        val toRecipients = parseRecipients(parseStringListParam(recipients), "recipients")
-        val ccRecipients = parseRecipients(parseStringListParam(cc), "cc")
-        val bccRecipients = parseRecipients(parseStringListParam(bcc), "bcc")
-        val replyToRecipients = parseRecipients(parseStringListParam(replyTo), "replyTo")
-
-        // replyTo addresses are not delivery recipients — they do not receive the message.
-        val totalRecipients = toRecipients.size + ccRecipients.size + bccRecipients.size
-        require(totalRecipients <= MAX_RECIPIENTS_TOTAL) {
-            "Total addresses across to/cc/bcc exceed $MAX_RECIPIENTS_TOTAL (got $totalRecipients)"
-        }
-        require(toRecipients.isNotEmpty()) { "At least one recipient (To) is required" }
-
-        val bodyHtml = resolveBodyContent(contentId)
-        val safeBodyHtml = sanitizeHtml(bodyHtml)
-        require(safeBodyHtml.isNotBlank()) {
-            "Email body became empty after sanitisation — check the HTML content stored at '$contentId'"
-        }
-
-        val attachments = resolveAttachments(parseStringListParam(attachmentIds).ifEmpty { null })
-
-        logger.debug("Preparing email — to: {} addresses, from: '{}', subject length: {}",
-            toRecipients.size, maskEmail(senderMailbox), subject.length)
-
         // Stable across a job-executor retry of the same activity (same execution, same
         // activity), but distinct per activity so an execution that sends multiple emails
         // across its lifetime (e.g. a loop) is never mistaken for a duplicate.
         val idempotencyKey = "${execution.id}:${execution.currentActivityId}"
 
-        val auditStart = System.currentTimeMillis()
-        try {
-            val isRetryOfAlreadySentEmail = sendIdempotencyGuard.alreadySent(idempotencyKey)
-            if (isRetryOfAlreadySentEmail) {
-                // The Graph API call for this exact activity instance already succeeded once;
-                // the surrounding transaction then rolled back for an unrelated reason and
-                // Operaton is retrying. Graph already accepted the email — sending it again
-                // would duplicate it, so skip the call and treat this as the same success.
-                logger.warn(
-                    "Skipping duplicate send for activity instance [{}] — already sent, " +
-                        "surrounding transaction must have rolled back and retried",
-                    idempotencyKey,
+        // Cheap early exit for the common case — a sequential retry after the surrounding
+        // transaction rolled back — that skips all validation and resource resolution below,
+        // not just the network call. ifNotAlreadySent() below is still the atomic, authoritative
+        // check: this is purely an optimization, safe to get "wrong" under a race, since a
+        // missed race here just means the work below runs once more before that check catches it.
+        if (sendIdempotencyGuard.alreadySent(idempotencyKey)) {
+            logger.warn(
+                "Skipping duplicate send for activity instance [{}] — already sent, surrounding " +
+                    "transaction must have rolled back and retried",
+                idempotencyKey,
+            )
+            return
+        }
+
+        // Everything below — validation, resolving body/attachments, the actual send, audit
+        // logging, event publishing — runs under a per-key lock (see SendIdempotencyGuard): two
+        // callers racing for the same key can never both reach client.sendMail, and a failed
+        // attempt is never marked sent, so a genuine retry after failure still runs in full.
+        val outcome =
+            sendIdempotencyGuard.ifNotAlreadySent(idempotencyKey) {
+                // Header injection guard — same fields the frontend already validates,
+                // re-checked server-side for defense in depth.
+                requireNoControlChars(senderMailbox, "senderMailbox")
+                requireNoControlChars(subject, "subject")
+
+                require(isValidEmail(senderMailbox)) { "Invalid sender email: '$senderMailbox'" }
+                require(isSenderAllowed(senderMailbox, allowedSendersList())) {
+                    "Sender '$senderMailbox' is not on the 'allowedSenders' allowlist of this plugin configuration"
+                }
+
+                require(subject.isNotBlank()) { "Email subject must not be blank" }
+                require(subject.length <= MAX_SUBJECT_LENGTH) {
+                    "Email subject exceeds $MAX_SUBJECT_LENGTH characters (${subject.length})"
+                }
+                require(isValidResourceId(contentId)) {
+                    "Invalid contentId: '$contentId' — must not be blank or contain path-traversal sequences"
+                }
+
+                val toRecipients = parseRecipients(parseStringListParam(recipients), "recipients")
+                val ccRecipients = parseRecipients(parseStringListParam(cc), "cc")
+                val bccRecipients = parseRecipients(parseStringListParam(bcc), "bcc")
+                val replyToRecipients = parseRecipients(parseStringListParam(replyTo), "replyTo")
+
+                // replyTo addresses are not delivery recipients — they do not receive the message.
+                val totalRecipients = toRecipients.size + ccRecipients.size + bccRecipients.size
+                require(totalRecipients <= MAX_RECIPIENTS_TOTAL) {
+                    "Total addresses across to/cc/bcc exceed $MAX_RECIPIENTS_TOTAL (got $totalRecipients)"
+                }
+                require(toRecipients.isNotEmpty()) { "At least one recipient (To) is required" }
+
+                val bodyHtml = resolveBodyContent(contentId)
+                val safeBodyHtml = sanitizeHtml(bodyHtml)
+                require(safeBodyHtml.isNotBlank()) {
+                    "Email body became empty after sanitisation — check the HTML content stored at '$contentId'"
+                }
+
+                val attachments = resolveAttachments(parseStringListParam(attachmentIds).ifEmpty { null })
+
+                logger.debug(
+                    "Preparing email — to: {} addresses, from: '{}', subject length: {}",
+                    toRecipients.size,
+                    maskEmail(senderMailbox),
+                    subject.length,
                 )
-            } else {
-                client.sendMail(
-                    credentials =
-                        GraphCredentials(
-                            tenantId = tenantId,
-                            clientId = clientId,
-                            clientSecret = clientSecret,
+
+                val auditStart = System.currentTimeMillis()
+                try {
+                    client.sendMail(
+                        credentials =
+                            GraphCredentials(
+                                tenantId = tenantId,
+                                clientId = clientId,
+                                clientSecret = clientSecret,
+                            ),
+                        mail =
+                            OutboundMail(
+                                senderMailbox = senderMailbox,
+                                toRecipients = toRecipients,
+                                ccRecipients = ccRecipients,
+                                bccRecipients = bccRecipients,
+                                replyToRecipients = replyToRecipients,
+                                subject = subject,
+                                bodyHtml = safeBodyHtml,
+                                attachments = attachments,
+                                saveToSentItems = true,
+                            ),
+                    )
+                    val durationMs = System.currentTimeMillis() - auditStart
+                    auditLogger.info(
+                        "SEND_OK sender={} to={} cc={} bcc={} subject_len={} attachments={} duration_ms={}",
+                        maskEmail(senderMailbox),
+                        maskEmails(toRecipients.map { it.emailAddress.address }),
+                        maskEmails(ccRecipients.map { it.emailAddress.address }),
+                        maskEmails(bccRecipients.map { it.emailAddress.address }),
+                        subject.length,
+                        attachments.size,
+                        durationMs,
+                    )
+                    publishEventSafely(
+                        GraphMailEmailSentEvent(
+                            senderMailbox = maskEmail(senderMailbox),
+                            recipientCount = toRecipients.size,
+                            ccCount = ccRecipients.size,
+                            bccCount = bccRecipients.size,
+                            attachmentCount = attachments.size,
+                            durationMs = durationMs,
                         ),
-                    mail =
-                        OutboundMail(
-                            senderMailbox = senderMailbox,
-                            toRecipients = toRecipients,
-                            ccRecipients = ccRecipients,
-                            bccRecipients = bccRecipients,
-                            replyToRecipients = replyToRecipients,
-                            subject = subject,
-                            bodyHtml = safeBodyHtml,
-                            attachments = attachments,
-                            saveToSentItems = true,
+                    )
+                } catch (ex: Exception) {
+                    val durationMs = System.currentTimeMillis() - auditStart
+                    auditLogger.warn(
+                        "SEND_FAIL sender={} to={} subject_len={} duration_ms={} error={}",
+                        maskEmail(senderMailbox),
+                        maskEmails(toRecipients.map { it.emailAddress.address }),
+                        subject.length,
+                        durationMs,
+                        ex.message,
+                    )
+                    publishEventSafely(
+                        GraphMailEmailFailedEvent(
+                            senderMailbox = maskEmail(senderMailbox),
+                            recipientCount = toRecipients.size,
+                            reason =
+                                (ex.message ?: ex.javaClass.simpleName)
+                                    .replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) },
+                            durationMs = durationMs,
                         ),
-                )
-                sendIdempotencyGuard.markSent(idempotencyKey)
+                    )
+                    throw ex
+                }
             }
-            val durationMs = System.currentTimeMillis() - auditStart
-            auditLogger.info(
-                "SEND_OK sender={} to={} cc={} bcc={} subject_len={} attachments={} duration_ms={} duplicate={}",
-                maskEmail(senderMailbox),
-                maskEmails(toRecipients.map { it.emailAddress.address }),
-                maskEmails(ccRecipients.map { it.emailAddress.address }),
-                maskEmails(bccRecipients.map { it.emailAddress.address }),
-                subject.length,
-                attachments.size,
-                durationMs,
-                isRetryOfAlreadySentEmail,
+
+        if (outcome == null) {
+            logger.warn(
+                "Skipping duplicate send for activity instance [{}] — already sent (detected at send time)",
+                idempotencyKey,
             )
-            publishEventSafely(GraphMailEmailSentEvent(
-                senderMailbox = maskEmail(senderMailbox),
-                recipientCount = toRecipients.size,
-                ccCount = ccRecipients.size,
-                bccCount = bccRecipients.size,
-                attachmentCount = attachments.size,
-                durationMs = durationMs,
-            ))
-        } catch (ex: Exception) {
-            val durationMs = System.currentTimeMillis() - auditStart
-            auditLogger.warn(
-                "SEND_FAIL sender={} to={} subject_len={} duration_ms={} error={}",
-                maskEmail(senderMailbox),
-                maskEmails(toRecipients.map { it.emailAddress.address }),
-                subject.length,
-                durationMs,
-                ex.message,
-            )
-            publishEventSafely(GraphMailEmailFailedEvent(
-                senderMailbox = maskEmail(senderMailbox),
-                recipientCount = toRecipients.size,
-                reason = (ex.message ?: ex.javaClass.simpleName)
-                    .replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) },
-                durationMs = durationMs,
-            ))
-            throw ex
         }
     }
 
