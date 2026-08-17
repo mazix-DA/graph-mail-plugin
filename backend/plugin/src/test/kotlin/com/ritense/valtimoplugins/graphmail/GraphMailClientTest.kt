@@ -29,6 +29,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching
 import com.github.tomakehurst.wiremock.client.WireMock.anyUrl
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
+import com.github.tomakehurst.wiremock.http.Fault
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -561,7 +562,7 @@ class GraphMailClientTest {
         wireMock.stubFor(post(urlPathMatching(draftPath))
             .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")))
         val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
-        assertTrue(ex.message!!.contains("Rate limited creating draft") && ex.message!!.contains("5 attempts"))
+        assertTrue(ex.message!!.contains("Rate limited during draft creation") && ex.message!!.contains("5 attempts"))
         wireMock.verify(5, postRequestedFor(urlPathMatching(draftPath)))
     }
 
@@ -581,6 +582,71 @@ class GraphMailClientTest {
         sendLarge()
 
         wireMock.verify(2, postRequestedFor(urlPathMatching(draftPath)))
+    }
+
+    @Test fun `network error on createDraft retries and succeeds`() {
+        // Regression test: createDraft previously did not catch ResourceAccessException at all,
+        // so a connection reset here would abort the whole send instead of retrying like the
+        // inline sendMail path does.
+        stubToken()
+        val firstAttempt =
+            post(urlPathMatching(draftPath))
+                .inScenario("draft-network-error")
+                .whenScenarioStateIs("Started")
+                .willReturn(aResponse().withFault(Fault.CONNECTION_RESET_BY_PEER))
+                .willSetStateTo("ok")
+        wireMock.stubFor(firstAttempt)
+        val secondAttempt =
+            post(urlPathMatching(draftPath))
+                .inScenario("draft-network-error")
+                .whenScenarioStateIs("ok")
+                .willReturn(okJson("""{"id":"draft-1"}"""))
+        wireMock.stubFor(secondAttempt)
+        stubUploadSession("${wireMock.baseUrl()}/upload/s1")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        stubSendDraft()
+
+        sendLarge()
+
+        wireMock.verify(2, postRequestedFor(urlPathMatching(draftPath)))
+    }
+
+    // ── Draft flow: upload session error handling ─────────────────────────────
+
+    @Test fun `401 twice on upload session creation throws GraphMailTokenExpiredException`() {
+        // Regression test: this endpoint previously only retried a 401 once but, on a second
+        // 401, threw a plain GraphMailException instead of GraphMailTokenExpiredException like
+        // every other Graph API call site in this class.
+        stubToken()
+        stubDraftCreate()
+        wireMock.stubFor(post(urlPathMatching(uploadSessionPath)).willReturn(aResponse().withStatus(401)))
+
+        assertThrows(GraphMailTokenExpiredException::class.java) { sendLarge() }
+    }
+
+    @Test fun `429 on upload session creation retries and succeeds`() {
+        // Regression test: this endpoint previously did not retry 429/5xx/network errors at all.
+        stubToken()
+        stubDraftCreate()
+        val firstAttempt =
+            post(urlPathMatching(uploadSessionPath))
+                .inScenario("upload-session-429")
+                .whenScenarioStateIs("Started")
+                .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0"))
+                .willSetStateTo("ok")
+        wireMock.stubFor(firstAttempt)
+        val secondAttempt =
+            post(urlPathMatching(uploadSessionPath))
+                .inScenario("upload-session-429")
+                .whenScenarioStateIs("ok")
+                .willReturn(okJson("""{"uploadUrl":"${wireMock.baseUrl()}/upload/s1"}"""))
+        wireMock.stubFor(secondAttempt)
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        stubSendDraft()
+
+        sendLarge()
+
+        wireMock.verify(2, postRequestedFor(urlPathMatching(uploadSessionPath)))
     }
 
     // ── Draft flow: chunk upload error handling ───────────────────────────────
@@ -658,7 +724,7 @@ class GraphMailClientTest {
         wireMock.stubFor(post(urlPathMatching(sendDraftPath))
             .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")))
         val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
-        assertTrue(ex.message!!.contains("Rate limited sending draft") && ex.message!!.contains("5 attempts"))
+        assertTrue(ex.message!!.contains("Rate limited during draft send") && ex.message!!.contains("5 attempts"))
         wireMock.verify(5, postRequestedFor(urlPathMatching(sendDraftPath)))
     }
 

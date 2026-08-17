@@ -6,8 +6,8 @@ import org.springframework.http.MediaType
 import org.springframework.util.LinkedMultiValueMap
 import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.HttpServerErrorException
-import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
+import org.springframework.web.client.RestClientException
 import org.springframework.web.util.UriComponentsBuilder
 import java.net.URI
 import java.security.MessageDigest
@@ -128,6 +128,14 @@ class GraphMailClientImpl(
         return response.accessToken to expiresAt
     }
 
+    // Jitter widens as backoffMs grows; divisor controls how wide (backoffMs / divisor).
+    // Token requests use a wider jitter band (divisor 2) than Graph API calls (divisor 5) —
+    // preserved from the pre-existing tuning, not changed by this refactor.
+    private fun jitteredBackoff(
+        backoffMs: Long,
+        divisor: Long,
+    ): Long = backoffMs + Random.nextLong(0, (backoffMs / divisor).coerceAtLeast(1))
+
     private fun postTokenWithRetry(url: String, form: LinkedMultiValueMap<String, String>, tenantId: String): TokenResponse {
         var attempt = 0
         var backoffMs = INITIAL_BACKOFF_MS
@@ -154,21 +162,160 @@ class GraphMailClientImpl(
                     logger.error("Azure Entra unavailable ({}) after {} token attempts", ex.statusCode, attempt)
                     throw GraphMailException("Azure Entra unavailable (${ex.statusCode})")
                 }
-                val delay = backoffMs + Random.nextLong(0, (backoffMs / 2).coerceAtLeast(1))
+                val delay = jitteredBackoff(backoffMs, divisor = 2)
                 logger.warn("Token request {} — attempt {}/{}, retrying in {}ms",
                     ex.statusCode, attempt, TOKEN_MAX_RETRIES, delay)
                 Thread.sleep(delay)
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
-            } catch (ex: ResourceAccessException) {
+            } catch (ex: RestClientException) {
                 if (attempt >= TOKEN_MAX_RETRIES) {
                     logger.warn("Token request timed out for tenant [{}] after {} attempts: {}",
                         tenantId, attempt, ex.message)
                     throw GraphMailException("Could not reach Azure Entra (timeout or network error): ${ex.message}")
                 }
-                val delay = backoffMs + Random.nextLong(0, (backoffMs / 2).coerceAtLeast(1))
+                val delay = jitteredBackoff(backoffMs, divisor = 2)
                 logger.warn("Token request network error — attempt {}/{}, retrying in {}ms: {}",
                     attempt, TOKEN_MAX_RETRIES, delay, ex.message)
                 Thread.sleep(delay)
+                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
+            }
+        }
+    }
+
+    // Shared retry loop for every credential-bearing Graph API call (draft creation, upload
+    // session creation, draft send, inline send): deadline-aware, refreshes the cached token
+    // exactly once on 401, honours Retry-After on 429 (capped), and backs off with jitter on
+    // 5xx/network errors.
+    //
+    // Consolidates what were four near-identical hand-rolled retry loops. Several inconsistencies
+    // this also fixes: (1) draft-creation and draft-send previously did NOT retry on
+    // connection/transport failures at all — a network blip there was a hard failure, while the
+    // same blip during inline send was retried; (2) upload-session creation only ever retried a
+    // 401 once and never retried 429/5xx/network errors at all, and on a second 401 threw a plain
+    // GraphMailException instead of GraphMailTokenExpiredException like the other three flows;
+    // (3) the network-error catch was narrowed to ResourceAccessException everywhere, but
+    // RestClient can also wrap a connection reset that happens mid-response-read as a bare
+    // RestClientException (thrown from readWithMessageConverters, not doExecute) — catching the
+    // broader RestClientException here (after the more specific Http*ErrorException catches)
+    // covers both cases without swallowing HTTP status errors, which are matched first.
+    private fun <T> sendGraphRequestWithRetry(
+        credentials: GraphCredentials,
+        mailbox: String,
+        deadline: Long,
+        timeoutBudgetMs: Long,
+        actionLabel: String,
+        permissionHint: String,
+        request: (token: String) -> T,
+    ): T {
+        var tokenRefreshed = false
+        var attempt = 0
+        var backoffMs = INITIAL_BACKOFF_MS
+
+        while (true) {
+            if (System.currentTimeMillis() > deadline) {
+                throw GraphMailException("Timed out during $actionLabel after ${timeoutBudgetMs}ms")
+            }
+            attempt++
+            val token = getAccessToken(credentials)
+            try {
+                return request(token)
+            } catch (ex: HttpClientErrorException) {
+                when (ex.statusCode.value()) {
+                    401 -> {
+                        if (tokenRefreshed) {
+                            logger.error(
+                                "401 Unauthorized after fresh token during {} — {} likely missing",
+                                actionLabel,
+                                permissionHint,
+                            )
+                            throw GraphMailTokenExpiredException(
+                                "Token rejected during $actionLabel (401) even after refresh — check $permissionHint",
+                                ex,
+                            )
+                        }
+                        logger.warn(
+                            "401 Unauthorized during {} — invalidating cached token for [{}:***] and retrying once",
+                            actionLabel,
+                            credentials.tenantId,
+                        )
+                        invalidateCache(credentials.tenantId, credentials.clientId)
+                        tokenRefreshed = true
+                        attempt-- // Don't burn a retry attempt on the refresh.
+                    }
+                    429 -> {
+                        if (attempt >= MAX_RETRIES) {
+                            throw GraphMailException(
+                                "Rate limited during $actionLabel after $MAX_RETRIES attempts (429)",
+                                ex,
+                            )
+                        }
+                        val retryAfterMs =
+                            parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
+                                .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000
+                        val wait = retryAfterMs.coerceAtMost(deadline - System.currentTimeMillis())
+                        logger.warn("429 Rate limited during {} — waiting {}ms", actionLabel, wait)
+                        if (wait > 0) Thread.sleep(wait)
+                    }
+                    else -> {
+                        logger.error(
+                            "Graph API rejected {} ({}): mailbox='{}'",
+                            actionLabel,
+                            ex.statusCode,
+                            maskEmail(mailbox),
+                        )
+                        throw GraphMailException(
+                            "Graph API rejected $actionLabel (${ex.statusCode}): check mailbox and $permissionHint",
+                            ex,
+                            statusCode = ex.statusCode.value(),
+                        )
+                    }
+                }
+            } catch (ex: HttpServerErrorException) {
+                if (attempt >= MAX_RETRIES) {
+                    logger.error(
+                        "Graph API unavailable during {} after {} attempts ({})",
+                        actionLabel,
+                        MAX_RETRIES,
+                        ex.statusCode,
+                    )
+                    throw GraphMailException(
+                        "Graph API unavailable during $actionLabel after $MAX_RETRIES attempts (${ex.statusCode})",
+                        ex,
+                    )
+                }
+                val delay = jitteredBackoff(backoffMs, divisor = 5).coerceAtMost(deadline - System.currentTimeMillis())
+                logger.warn(
+                    "Graph API {} during {} — attempt {}/{}, waiting {}ms",
+                    ex.statusCode,
+                    actionLabel,
+                    attempt,
+                    MAX_RETRIES,
+                    delay,
+                )
+                if (delay > 0) Thread.sleep(delay)
+                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
+            } catch (ex: RestClientException) {
+                if (attempt >= MAX_RETRIES) {
+                    logger.error(
+                        "Graph API unreachable during {} after {} attempts: {}",
+                        actionLabel,
+                        MAX_RETRIES,
+                        ex.message,
+                    )
+                    throw GraphMailException(
+                        "Graph API unreachable during $actionLabel after $MAX_RETRIES attempts: ${ex.message}",
+                        ex,
+                    )
+                }
+                val delay = jitteredBackoff(backoffMs, divisor = 5).coerceAtMost(deadline - System.currentTimeMillis())
+                logger.warn(
+                    "Graph API network error during {} — attempt {}/{}, retrying in {}ms",
+                    actionLabel,
+                    attempt,
+                    MAX_RETRIES,
+                    delay,
+                )
+                if (delay > 0) Thread.sleep(delay)
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             }
         }
@@ -290,54 +437,24 @@ class GraphMailClientImpl(
             .buildAndExpand(senderMailbox)
             .toUri()
 
-        var tokenRefreshed = false
-        var attempt = 0
-        var backoffMs = INITIAL_BACKOFF_MS
-
-        while (true) {
-            if (System.currentTimeMillis() > deadline)
-                throw GraphMailException("Draft creation timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
-            attempt++
-            val token = getAccessToken(credentials)
-            try {
-                return restClient.post()
-                    .uri(uri)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(message)
-                    .retrieve()
-                    .body(DraftMessageResponse::class.java)
-                    ?.id
-                    ?: throw GraphMailException("Empty response body when creating draft message")
-            } catch (ex: HttpClientErrorException) {
-                when (ex.statusCode.value()) {
-                    401 -> {
-                        if (tokenRefreshed) throw GraphMailTokenExpiredException(
-                            "Token rejected when creating draft (401) — check Mail.ReadWrite permission", ex)
-                        invalidateCache(credentials.tenantId, credentials.clientId)
-                        tokenRefreshed = true
-                        attempt--
-                    }
-                    429 -> {
-                        if (attempt >= MAX_RETRIES)
-                            throw GraphMailException("Rate limited creating draft after $MAX_RETRIES attempts", ex)
-                        val wait = (parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
-                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000)
-                            .coerceAtMost(deadline - System.currentTimeMillis())
-                        if (wait > 0) Thread.sleep(wait)
-                    }
-                    else -> throw GraphMailException(
-                        "Graph API rejected draft creation (${ex.statusCode})", ex,
-                        statusCode = ex.statusCode.value())
-                }
-            } catch (ex: HttpServerErrorException) {
-                if (attempt >= MAX_RETRIES)
-                    throw GraphMailException("Graph API unavailable creating draft after $MAX_RETRIES attempts", ex)
-                val delay = (backoffMs + Random.nextLong(0, (backoffMs / 5).coerceAtLeast(1)))
-                    .coerceAtMost(deadline - System.currentTimeMillis())
-                if (delay > 0) Thread.sleep(delay)
-                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
-            }
+        return sendGraphRequestWithRetry(
+            credentials,
+            senderMailbox,
+            deadline,
+            MAX_DRAFT_SEND_WALL_CLOCK_MS,
+            actionLabel = "draft creation",
+            permissionHint = "Mail.ReadWrite permission",
+        ) { token ->
+            restClient
+                .post()
+                .uri(uri)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(message)
+                .retrieve()
+                .body(DraftMessageResponse::class.java)
+                ?.id
+                ?: throw GraphMailException("Empty response body when creating draft message")
         }
     }
 
@@ -361,35 +478,26 @@ class GraphMailClientImpl(
             )
         )
 
-        if (System.currentTimeMillis() > deadline)
-            throw GraphMailException("Upload session creation timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
-
-        var tokenRefreshed = false
-
-        fun doPost(token: String): String =
-            restClient.post()
-                .uri(uri)
-                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(body)
-                .retrieve()
-                .body(UploadSessionResponse::class.java)
-                ?.uploadUrl
-                ?: throw GraphMailException("Empty uploadUrl in upload session response")
-
-        val uploadUrl = try {
-            doPost(getAccessToken(credentials))
-        } catch (ex: HttpClientErrorException) {
-            if (ex.statusCode.value() == 401 && !tokenRefreshed) {
-                tokenRefreshed = true
-                invalidateCache(credentials.tenantId, credentials.clientId)
-                doPost(getAccessToken(credentials))
-            } else {
-                throw GraphMailException(
-                    "Graph API rejected upload session creation (${ex.statusCode})", ex,
-                    statusCode = ex.statusCode.value())
+        val uploadUrl =
+            sendGraphRequestWithRetry(
+                credentials,
+                senderMailbox,
+                deadline,
+                MAX_DRAFT_SEND_WALL_CLOCK_MS,
+                actionLabel = "upload session creation",
+                permissionHint = "Mail.ReadWrite permission",
+            ) { token ->
+                restClient
+                    .post()
+                    .uri(uri)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(UploadSessionResponse::class.java)
+                    ?.uploadUrl
+                    ?: throw GraphMailException("Empty uploadUrl in upload session response")
             }
-        }
 
         // Derive expected scheme+host from graphBaseUrl so WireMock tests (http://localhost)
         // pass while production rejects any non-Microsoft https:// domain.
@@ -443,7 +551,7 @@ class GraphMailClientImpl(
                     val delay = (500L * (1 shl (chunkAttempt - 1)))
                         .coerceAtMost(deadline - System.currentTimeMillis())
                     if (delay > 0) Thread.sleep(delay)
-                } catch (ex: ResourceAccessException) {
+                } catch (ex: RestClientException) {
                     if (chunkAttempt >= CHUNK_MAX_RETRIES)
                         throw GraphMailException(
                             "Chunk upload unreachable after $CHUNK_MAX_RETRIES attempts at offset $offset", ex)
@@ -467,52 +575,21 @@ class GraphMailClientImpl(
             .buildAndExpand(senderMailbox, draftId)
             .toUri()
 
-        var tokenRefreshed = false
-        var attempt = 0
-        var backoffMs = INITIAL_BACKOFF_MS
-
-        while (true) {
-            if (System.currentTimeMillis() > deadline)
-                throw GraphMailException("Draft send timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
-            attempt++
-            val token = getAccessToken(credentials)
-            try {
-                restClient.post()
-                    .uri(uri)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
-                    .contentLength(0)
-                    .retrieve()
-                    .toBodilessEntity()
-                return
-            } catch (ex: HttpClientErrorException) {
-                when (ex.statusCode.value()) {
-                    401 -> {
-                        if (tokenRefreshed) throw GraphMailTokenExpiredException(
-                            "Token rejected sending draft (401) — check Mail.Send permission", ex)
-                        invalidateCache(credentials.tenantId, credentials.clientId)
-                        tokenRefreshed = true
-                        attempt--
-                    }
-                    429 -> {
-                        if (attempt >= MAX_RETRIES)
-                            throw GraphMailException("Rate limited sending draft after $MAX_RETRIES attempts", ex)
-                        val wait = (parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
-                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000)
-                            .coerceAtMost(deadline - System.currentTimeMillis())
-                        if (wait > 0) Thread.sleep(wait)
-                    }
-                    else -> throw GraphMailException(
-                        "Graph API rejected draft send (${ex.statusCode})", ex,
-                        statusCode = ex.statusCode.value())
-                }
-            } catch (ex: HttpServerErrorException) {
-                if (attempt >= MAX_RETRIES)
-                    throw GraphMailException("Graph API unavailable sending draft after $MAX_RETRIES attempts", ex)
-                val delay = (backoffMs + Random.nextLong(0, (backoffMs / 5).coerceAtLeast(1)))
-                    .coerceAtMost(deadline - System.currentTimeMillis())
-                if (delay > 0) Thread.sleep(delay)
-                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
-            }
+        sendGraphRequestWithRetry(
+            credentials,
+            senderMailbox,
+            deadline,
+            MAX_DRAFT_SEND_WALL_CLOCK_MS,
+            actionLabel = "draft send",
+            permissionHint = "Mail.Send permission",
+        ) { token ->
+            restClient
+                .post()
+                .uri(uri)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .contentLength(0)
+                .retrieve()
+                .toBodilessEntity()
         }
     }
 
@@ -522,92 +599,23 @@ class GraphMailClientImpl(
         payload: SendMailRequest,
         mailbox: String,
     ) {
-        val callDeadline = System.currentTimeMillis() + MAX_SEND_WALL_CLOCK_MS
-        var tokenRefreshed = false
-        var attempt = 0
-        var backoffMs = INITIAL_BACKOFF_MS
-
-        while (true) {
-            if (System.currentTimeMillis() > callDeadline) {
-                throw GraphMailException(
-                    "Email send timed out — total wall-clock limit of ${MAX_SEND_WALL_CLOCK_MS}ms exceeded"
-                )
-            }
-            attempt++
-            val token = getAccessToken(credentials)
-            try {
-                restClient.post()
-                    .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(payload)
-                    .retrieve()
-                    .toBodilessEntity()
-                return
-            } catch (ex: HttpClientErrorException) {
-                when (ex.statusCode.value()) {
-                    401 -> {
-                        if (tokenRefreshed) {
-                            logger.error("401 Unauthorized after fresh token — Mail.Send permission likely missing")
-                            throw GraphMailTokenExpiredException(
-                                "Token rejected by Graph API (401) even after refresh — check Mail.Send permission", ex
-                            )
-                        }
-                        logger.warn("401 Unauthorized — invalidating cached token for [{}:***] and retrying once",
-                            credentials.tenantId)
-                        invalidateCache(credentials.tenantId, credentials.clientId)
-                        tokenRefreshed = true
-                        attempt-- // Don't burn a retry attempt on the refresh.
-                    }
-                    429 -> {
-                        val retryAfter = parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
-                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS)
-                        if (attempt >= MAX_RETRIES) {
-                            throw GraphMailException("Rate limited after $MAX_RETRIES attempts (429)", ex)
-                        }
-                        val sleepMs = minOf(retryAfter * 1000, callDeadline - System.currentTimeMillis())
-                        logger.warn("429 Rate limited — waiting {}ms (Retry-After={}s, wall-clock cap)",
-                            sleepMs, retryAfter)
-                        if (sleepMs > 0) Thread.sleep(sleepMs)
-                    }
-                    else -> {
-                        logger.error("Graph API rejected email ({}): mailbox='{}'",
-                            ex.statusCode, maskEmail(mailbox))
-                        throw GraphMailException(
-                            "Graph API rejected email (${ex.statusCode}): check mailbox and Mail.Send permission",
-                            ex,
-                            statusCode = ex.statusCode.value(),
-                        )
-                    }
-                }
-            } catch (ex: HttpServerErrorException) {
-                if (attempt >= MAX_RETRIES) {
-                    logger.error("Graph API unavailable after {} attempts ({})", MAX_RETRIES, ex.statusCode)
-                    throw GraphMailException(
-                        "Graph API unavailable after $MAX_RETRIES attempts (${ex.statusCode})", ex
-                    )
-                }
-                // Jitter scales with backoff (up to 20% of current backoff) — better thundering-herd defense.
-                val jitter = Random.nextLong(0, (backoffMs / 5).coerceAtLeast(1))
-                val delayMs = minOf(backoffMs + jitter, callDeadline - System.currentTimeMillis())
-                logger.warn("Graph API {} — attempt {}/{}, waiting {}ms",
-                    ex.statusCode, attempt, MAX_RETRIES, delayMs)
-                if (delayMs > 0) Thread.sleep(delayMs)
-                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
-            } catch (ex: ResourceAccessException) {
-                if (attempt >= MAX_RETRIES) {
-                    logger.error("Graph API unreachable after {} attempts: {}", MAX_RETRIES, ex.message)
-                    throw GraphMailException("Graph API unreachable after $MAX_RETRIES attempts: ${ex.message}", ex)
-                }
-                val delayMs = minOf(
-                    backoffMs + Random.nextLong(0, (backoffMs / 5).coerceAtLeast(1)),
-                    callDeadline - System.currentTimeMillis()
-                )
-                logger.warn("Graph API network error — attempt {}/{}, retrying in {}ms",
-                    attempt, MAX_RETRIES, delayMs)
-                if (delayMs > 0) Thread.sleep(delayMs)
-                backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
-            }
+        val deadline = System.currentTimeMillis() + MAX_SEND_WALL_CLOCK_MS
+        sendGraphRequestWithRetry(
+            credentials,
+            mailbox,
+            deadline,
+            MAX_SEND_WALL_CLOCK_MS,
+            actionLabel = "email send",
+            permissionHint = "Mail.Send permission",
+        ) { token ->
+            restClient
+                .post()
+                .uri(url)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(payload)
+                .retrieve()
+                .toBodilessEntity()
         }
     }
 }

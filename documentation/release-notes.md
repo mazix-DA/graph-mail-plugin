@@ -2,6 +2,25 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.6
+Kwaliteitsverbeteringen naar aanleiding van een codekwaliteitsreview: minder duplicatie in de
+Graph API-retrylogica en een oplossing voor het risico op dubbel verzonden e-mails bij een
+transactie-rollback.
+- Vier bijna-identieke, met de hand geschreven retry-loops (draft aanmaken, upload-sessie
+  aanmaken, draft versturen, inline versturen) samengevoegd tot één gedeelde implementatie.
+  Daarbij zijn twee robuustheidsgaten gedicht die de duplicatie camoufleerde: de draft-flow
+  retryde nooit op netwerkfouten (in tegenstelling tot het inline-verzendpad), en het aanmaken
+  van een upload-sessie retryde helemaal niet op 429/5xx en gaf bij een tweede 401 de verkeerde
+  exception-klasse terug.
+- Nieuwe `SendIdempotencyGuard`: als de Operaton-transactie na een geslaagde verzending alsnog
+  terugrolt (bijv. door een optimistic lock op andere procesdata) en de service-task-activiteit
+  daardoor opnieuw uitvoert, werd de e-mail voorheen een tweede keer verstuurd — Graph had het
+  eerste verzoek al onomkeerbaar geaccepteerd. Een niet-transactionele, in-memory guard herkent
+  deze exacte herhaling (execution-id + activity-id) en slaat de tweede Graph-aanroep over.
+  Beperking: dit beschermt tegen een retry binnen dezelfde JVM-instantie (het realistische
+  scenario), niet tegen een applicatie-herstart tussen de oorspronkelijke verzending en een latere
+  retry — dat zou een duurzame, transactie-onafhankelijke opslag vereisen.
+
 ## 1.0.5
 Laatste ronde van de grondige security-analyse: dependency-hygiëne en verdere secret-maskering.
 - `jsoup` opgehoogd van 1.17.2 naar 1.23.1. 1.17.2 valt binnen het kwetsbare bereik van

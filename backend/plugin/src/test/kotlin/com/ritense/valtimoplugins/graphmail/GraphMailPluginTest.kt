@@ -25,6 +25,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import org.springframework.context.ApplicationEventPublisher
@@ -49,8 +50,13 @@ class GraphMailPluginTest {
             clientSecret = "test-secret"
             allowedSenders = "@test.nl"
         }
+        whenever(execution.id).thenReturn("execution-1")
+        whenever(execution.currentActivityId).thenReturn("send-email-task")
+        // thenAnswer (not thenReturn) — a fresh stream per call, matching a real storage
+        // service; thenReturn would hand back the same already-consumed/closed stream on a
+        // second sendEmail() call within one test (e.g. the idempotency retry tests below).
         whenever(storage.getResourceContentAsInputStream(VALID_CONTENT_UUID))
-            .thenReturn(ByteArrayInputStream("<p>Test</p>".toByteArray()))
+            .thenAnswer { ByteArrayInputStream("<p>Test</p>".toByteArray()) }
     }
 
     private fun send(
@@ -68,7 +74,7 @@ class GraphMailPluginTest {
 
     private fun mockBodyHtml(html: String) {
         whenever(storage.getResourceContentAsInputStream(VALID_CONTENT_UUID))
-            .thenReturn(ByteArrayInputStream(html.toByteArray()))
+            .thenAnswer { ByteArrayInputStream(html.toByteArray()) }
     }
 
     // ── Sender mailbox ───────────────────────────────────────────────────────
@@ -392,5 +398,41 @@ class GraphMailPluginTest {
             .doThrow(RuntimeException("listener failed"))
         val ex = assertThrows<GraphMailException> { send() }
         assert(ex.message == "send failed")
+    }
+
+    // ── Idempotency (retry after transaction rollback) ─────────────────────────────
+
+    @Test fun `retrying the same activity instance after a successful send does not send twice`() {
+        // Simulates: sendEmail succeeds, the surrounding Operaton transaction then rolls back
+        // for an unrelated reason, and the job-executor retries the same activity instance.
+        send()
+        send()
+        verify(mailClient, times(1)).sendMail(any(), any())
+    }
+
+    @Test fun `retrying the same activity instance after a successful send still publishes SEND_OK`() {
+        send()
+        send()
+        verify(eventPublisher, times(2)).publishEvent(any<GraphMailEmailSentEvent>())
+    }
+
+    @Test fun `a different activity instance on the same execution is not treated as a duplicate`() {
+        // Same process execution, different activity (e.g. a second send-email task in a loop) —
+        // must not be mistaken for a retry of the first.
+        send()
+        whenever(execution.currentActivityId).thenReturn("send-email-task-2")
+        send()
+        verify(mailClient, times(2)).sendMail(any(), any())
+    }
+
+    @Test fun `a failed send is not marked as sent, so a genuine retry after failure still sends`() {
+        var callCount = 0
+        whenever(mailClient.sendMail(any(), any())).thenAnswer {
+            callCount++
+            if (callCount == 1) throw GraphMailException("transient failure")
+        }
+        assertThrows<GraphMailException> { send() }
+        send()
+        verify(mailClient, times(2)).sendMail(any(), any())
     }
 }
