@@ -63,7 +63,7 @@ npx ng test @valtimo-plugins/graph-mail --watch=false
 Voeg de volgende dependency toe aan je `build.gradle.kts`:
 
 ```kotlin
-implementation("com.ritense.valtimoplugins:graph-mail:1.0.5")
+implementation("com.ritense.valtimoplugins:graph-mail:1.0.6")
 ```
 
 Voeg de volgende configuratie toe aan je `application.yml`:

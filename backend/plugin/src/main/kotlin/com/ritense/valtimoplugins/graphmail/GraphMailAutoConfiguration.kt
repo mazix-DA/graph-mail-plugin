@@ -49,6 +49,14 @@ class GraphMailAutoConfiguration {
     @ConditionalOnMissingBean(GraphTokenCache::class)
     fun graphTokenCache(): GraphTokenCache = GraphTokenCache()
 
+    // Single shared instance for the same reason as graphTokenCache() above: a fresh
+    // GraphMailPlugin per action invocation means an instance-owned guard would never see the
+    // marker left by an earlier attempt of the same activity. See SendIdempotencyGuard's class
+    // doc for what failure mode this does and does not protect against.
+    @Bean
+    @ConditionalOnMissingBean(SendIdempotencyGuard::class)
+    fun sendIdempotencyGuard(): SendIdempotencyGuard = SendIdempotencyGuard()
+
     @Bean
     @ConditionalOnMissingBean(GraphMailClient::class)
     fun graphMailClient(
@@ -74,9 +82,17 @@ class GraphMailAutoConfiguration {
         resourceStorageService: TemporaryResourceStorageService,
         eventPublisher: ApplicationEventPublisher,
         graphTokenCache: GraphTokenCache,
-    ): GraphMailPluginFactory = GraphMailPluginFactory(
-        pluginService, restTemplateBuilder, objectMapper, resourceStorageService, eventPublisher, graphTokenCache
-    )
+        sendIdempotencyGuard: SendIdempotencyGuard,
+    ): GraphMailPluginFactory =
+        GraphMailPluginFactory(
+            pluginService,
+            restTemplateBuilder,
+            objectMapper,
+            resourceStorageService,
+            eventPublisher,
+            graphTokenCache,
+            sendIdempotencyGuard,
+        )
 
     @Bean
     @ConditionalOnMissingBean(GraphMailTestSendController::class)

@@ -86,6 +86,8 @@ class GraphMailPlugin(
     // Shared across all plugin instances by GraphMailAutoConfiguration/GraphMailPluginFactory —
     // see GraphTokenCache's class doc for why this must be injected rather than built per instance.
     private val graphTokenCache: GraphTokenCache = GraphTokenCache(),
+    // Same sharing requirement as graphTokenCache above — see SendIdempotencyGuard's class doc.
+    private val sendIdempotencyGuard: SendIdempotencyGuard = SendIdempotencyGuard(),
 ) {
     // Only set by the internal test constructor — overrides the lazy-built client.
     private var clientOverride: GraphMailClient? = null
@@ -155,9 +157,10 @@ class GraphMailPlugin(
 
     // NOTE: SERVICE_TASK_START fires when the service task begins executing, on the
     // Operaton job-executor thread. If the surrounding transaction rolls back and retries
-    // (e.g. optimistic lock), this action runs again and the email may be sent more than once.
-    // This is accepted (at-least-once): there is no idempotency guard. A process variable is
-    // NOT a reliable guard here — it is transactional and rolls back together with the retry.
+    // (e.g. optimistic lock on other process data written in the same transaction), this action
+    // runs again. sendIdempotencyGuard prevents that retry from sending the email a second time
+    // — see its class doc for the exact mechanism and its limitation (in-memory, does not survive
+    // a JVM restart between the original attempt and a later retry).
     @PluginAction(
         key = "send-email",
         title = "Send email",
@@ -167,7 +170,7 @@ class GraphMailPlugin(
         ],
     )
     fun sendEmail(
-        @Suppress("UNUSED_PARAMETER") execution: DelegateExecution,
+        execution: DelegateExecution,
         @PluginActionProperty senderMailbox: String,
         @PluginActionProperty recipients: String,
         @PluginActionProperty cc: String?,
@@ -233,25 +236,50 @@ class GraphMailPlugin(
         logger.debug("Preparing email — to: {} addresses, from: '{}', subject length: {}",
             toRecipients.size, maskEmail(senderMailbox), subject.length)
 
+        // Stable across a job-executor retry of the same activity (same execution, same
+        // activity), but distinct per activity so an execution that sends multiple emails
+        // across its lifetime (e.g. a loop) is never mistaken for a duplicate.
+        val idempotencyKey = "${execution.id}:${execution.currentActivityId}"
+
         val auditStart = System.currentTimeMillis()
         try {
-            client.sendMail(
-                credentials = GraphCredentials(tenantId = tenantId, clientId = clientId, clientSecret = clientSecret),
-                mail = OutboundMail(
-                    senderMailbox = senderMailbox,
-                    toRecipients = toRecipients,
-                    ccRecipients = ccRecipients,
-                    bccRecipients = bccRecipients,
-                    replyToRecipients = replyToRecipients,
-                    subject = subject,
-                    bodyHtml = safeBodyHtml,
-                    attachments = attachments,
-                    saveToSentItems = true,
-                ),
-            )
+            val isRetryOfAlreadySentEmail = sendIdempotencyGuard.alreadySent(idempotencyKey)
+            if (isRetryOfAlreadySentEmail) {
+                // The Graph API call for this exact activity instance already succeeded once;
+                // the surrounding transaction then rolled back for an unrelated reason and
+                // Operaton is retrying. Graph already accepted the email — sending it again
+                // would duplicate it, so skip the call and treat this as the same success.
+                logger.warn(
+                    "Skipping duplicate send for activity instance [{}] — already sent, " +
+                        "surrounding transaction must have rolled back and retried",
+                    idempotencyKey,
+                )
+            } else {
+                client.sendMail(
+                    credentials =
+                        GraphCredentials(
+                            tenantId = tenantId,
+                            clientId = clientId,
+                            clientSecret = clientSecret,
+                        ),
+                    mail =
+                        OutboundMail(
+                            senderMailbox = senderMailbox,
+                            toRecipients = toRecipients,
+                            ccRecipients = ccRecipients,
+                            bccRecipients = bccRecipients,
+                            replyToRecipients = replyToRecipients,
+                            subject = subject,
+                            bodyHtml = safeBodyHtml,
+                            attachments = attachments,
+                            saveToSentItems = true,
+                        ),
+                )
+                sendIdempotencyGuard.markSent(idempotencyKey)
+            }
             val durationMs = System.currentTimeMillis() - auditStart
             auditLogger.info(
-                "SEND_OK sender={} to={} cc={} bcc={} subject_len={} attachments={} duration_ms={}",
+                "SEND_OK sender={} to={} cc={} bcc={} subject_len={} attachments={} duration_ms={} duplicate={}",
                 maskEmail(senderMailbox),
                 maskEmails(toRecipients.map { it.emailAddress.address }),
                 maskEmails(ccRecipients.map { it.emailAddress.address }),
@@ -259,6 +287,7 @@ class GraphMailPlugin(
                 subject.length,
                 attachments.size,
                 durationMs,
+                isRetryOfAlreadySentEmail,
             )
             publishEventSafely(GraphMailEmailSentEvent(
                 senderMailbox = maskEmail(senderMailbox),
