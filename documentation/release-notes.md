@@ -2,6 +2,31 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.8
+Een externe review (CodeRabbit) op de 1.0.7-PR wees op een subtiele race in het per-sleutel
+lock-patroon dat zowel `SendIdempotencyGuard` als `GraphTokenCache` gebruiken — hieronder de fix,
+plus twee kleinere kwaliteitsverbeteringen die in dezelfde review naar boven kwamen.
+- **Concurrency (echte bug)**: `lockFor(key)` haalde een `Lock` uit de map en riep daarna pas de
+  lock-eviction aan. In het smalle venster daartussen kon de eviction-aanroep voor een *andere*
+  sleutel dezelfde lock alsnog verwijderen — terwijl de eerste caller 'm net had vastgepakt maar
+  nog niet gelockt. Een derde caller voor diezelfde sleutel kreeg dan een
+  gloednieuw, ander Lock-object en liep gewoon parallel met de eerste door — precies de dubbele
+  uitvoering die deze klassen moeten voorkomen. Beide klassen halen nu de lock eerst op, locken
+  'm, en controleren pas dán of het nog steeds de actuele instantie in de map is; zo niet, dan
+  wordt de wees-lock losgelaten en opnieuw geprobeerd met de actuele instantie.
+- **Performance**: de lock-eviction-scan liep voorheen bij elke aanroep zodra de lock-map de
+  drempel overschreed, ook wanneer een vorige scan al niets vond om op te ruimen (bijvoorbeeld
+  omdat alle sleutels nog legitiem in gebruik zijn). Nu wordt een scan overgeslagen totdat de map
+  daadwerkelijk verder gegroeid is sinds de laatste (lege) scan.
+- **Testkwaliteit**: de nieuwe concurrency-test uit 1.0.7 had onbegrensde `await()`/`join()`-calls
+  (een hangende test blokkeert dan CI in plaats van te falen) en ving geen exceptions op de
+  worker-threads af (die zouden anders stilletjes verdwijnen in plaats van de test te laten
+  falen). Beide zijn nu begrensd (5s timeout) met expliciete assertions.
+- **Nieuwe testdekking**: `GraphTokenCache` had nog geen enkele eigen test, terwijl dit exact de
+  klasse is waarvan het lock-patroon hierboven gefixt is. `GraphTokenCacheTest` voegt dekking toe
+  voor cache-hits, het samenvallen van gelijktijdige cache-misses in één fetch, en
+  prefix-invalidatie.
+
 ## 1.0.7
 Correctie op de `SendIdempotencyGuard` uit 1.0.6: het eerste ontwerp voorkwam een dubbele
 Graph-aanroep, maar had zelf nog een prestatie- en een concurrency-gebrek.

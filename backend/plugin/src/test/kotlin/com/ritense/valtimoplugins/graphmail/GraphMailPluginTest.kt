@@ -18,6 +18,7 @@ package com.ritense.valtimoplugins.graphmail
 import com.ritense.resource.service.TemporaryResourceStorageService
 import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -30,6 +31,9 @@ import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import org.springframework.context.ApplicationEventPublisher
 import java.io.ByteArrayInputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 private const val VALID_CONTENT_UUID = "22222222-2222-2222-2222-222222222222"
 private const val VALID_UUID = "11111111-1111-1111-1111-111111111111"
@@ -422,25 +426,39 @@ class GraphMailPluginTest {
         // Simulates the rare race the cheap alreadySent() pre-check can miss: two callers reach
         // ifNotAlreadySent for the same key at (almost) the same time. The per-key lock inside
         // SendIdempotencyGuard must serialise them so only one actually calls mailClient.sendMail.
-        val startedLatch = java.util.concurrent.CountDownLatch(1)
-        val releaseLatch = java.util.concurrent.CountDownLatch(1)
+        val startedLatch = CountDownLatch(1)
+        val releaseLatch = CountDownLatch(1)
         whenever(mailClient.sendMail(any(), any())).thenAnswer {
             startedLatch.countDown()
             releaseLatch.await()
         }
-        val firstCallerThread = Thread { send() }
+
+        // Bounded (not just "wait forever"): a hung wait here would otherwise stall CI instead
+        // of failing this test. Any exception thrown on a caller's thread is captured rather than
+        // silently swallowed by the thread's default handler — a caller failing unexpectedly
+        // (e.g. a lock left in a broken state) must fail this test, not disappear.
+        val firstError = AtomicReference<Throwable?>()
+        val secondError = AtomicReference<Throwable?>()
+        val firstCallerThread = Thread { runCatching { send() }.onFailure { firstError.set(it) } }
         firstCallerThread.start()
-        startedLatch.await() // first caller is inside sendMail, holding the per-key lock
+        assertTrue(
+            startedLatch.await(5, TimeUnit.SECONDS),
+            "first caller never reached sendMail — it should have entered within 5s",
+        )
 
         // Second caller races in while the first is still in flight (before markSent runs) — on
         // its own thread, since it legitimately blocks on the per-key lock until the first
         // caller either fails or marks the key sent.
-        val secondCallerThread = Thread { send() }
+        val secondCallerThread = Thread { runCatching { send() }.onFailure { secondError.set(it) } }
         secondCallerThread.start()
 
         releaseLatch.countDown()
-        firstCallerThread.join()
-        secondCallerThread.join()
+        firstCallerThread.join(5_000)
+        secondCallerThread.join(5_000)
+        assertTrue(!firstCallerThread.isAlive, "first caller thread did not finish within 5s")
+        assertTrue(!secondCallerThread.isAlive, "second caller thread did not finish within 5s")
+        assertEquals(null, firstError.get(), "first caller threw unexpectedly")
+        assertEquals(null, secondError.get(), "second caller threw unexpectedly")
 
         verify(mailClient, times(1)).sendMail(any(), any())
     }

@@ -2,8 +2,8 @@ package com.ritense.valtimoplugins.graphmail
 
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 // Default capacity before stale entries get swept. Sized generously above realistic concurrent
 // in-flight-retry counts — see evictStaleIfNeeded.
@@ -50,6 +50,11 @@ class SendIdempotencyGuard(
     private val sentAt = ConcurrentHashMap<String, Instant>()
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
+    // Size of `locks` at the last eviction scan that found nothing to remove. Guards against
+    // rescanning the whole (oversized) map on every single call once it's full of keys that are
+    // all still legitimately in use — see evictStaleLocksIfNeeded.
+    private val locksSizeAtLastEviction = AtomicInteger(0)
+
     /**
      * Cheap, non-locking check for whether [key] was already sent. Safe to use as an early exit
      * before doing expensive work (resolving attachments, sanitising HTML) that would otherwise
@@ -66,16 +71,18 @@ class SendIdempotencyGuard(
     fun <T> ifNotAlreadySent(
         key: String,
         action: () -> T,
-    ): T? =
-        lockFor(key).withLock {
-            if (isSent(key)) {
-                null
-            } else {
-                val result = action()
-                markSent(key)
-                result
-            }
+    ): T? {
+        val lock = lockFor(key)
+        try {
+            if (isSent(key)) return null
+            val result = action()
+            markSent(key)
+            return result
+        } finally {
+            lock.unlock()
+            evictStaleLocksIfNeeded(key)
         }
+    }
 
     private fun isSent(key: String): Boolean {
         val at = sentAt[key] ?: return false
@@ -87,16 +94,38 @@ class SendIdempotencyGuard(
         sentAt[key] = Instant.now()
     }
 
-    private fun lockFor(key: String): ReentrantLock =
-        locks.computeIfAbsent(key) { ReentrantLock() }.also { evictStaleLocksIfNeeded(key) }
+    // Returns a Lock for `key`, held (locked) by the caller on return — the caller must unlock
+    // it. Acquires and validates in a loop rather than a single computeIfAbsent+lock: a lock is
+    // only ever evicted while free (tryLock succeeds in evictStaleLocksIfNeeded), so there is a
+    // narrow window between us reading the map's current instance and actually locking it where
+    // a concurrent eviction (triggered by a *different* key's call) can slip in, remove it, and
+    // leave us holding an orphaned Lock that a later caller for the same key will never see —
+    // two callers would then hold two different Lock objects for one key, and the exclusion this
+    // class exists to provide is gone. Re-checking identity against the live map entry after
+    // locking closes that window: if it no longer matches, our lock was orphaned mid-acquisition,
+    // so we drop it and retry against whatever is current.
+    private fun lockFor(key: String): ReentrantLock {
+        while (true) {
+            val lock = locks.computeIfAbsent(key) { ReentrantLock() }
+            lock.lock()
+            if (locks[key] === lock) return lock
+            lock.unlock()
+        }
+    }
 
-    // Mirrors GraphTokenCache.evictStaleLocksIfNeeded: only removes a lock that is provably free
-    // right now (tryLock succeeds) and not backing a currently-sent key — a key whose action is
-    // still running is legitimately lock-held but not yet marked sent, and evicting its lock
-    // would hand a racing second caller a *different* Lock instance for the same key, defeating
-    // the mutual exclusion this class exists to provide.
+    // Only removes a lock that is provably free right now (tryLock succeeds) and not backing a
+    // currently-sent key — a key whose action is still running is legitimately lock-held but not
+    // yet marked sent, and tryLock() correctly fails for it, so it's never a candidate.
+    //
+    // Bounded: once a scan at a given map size finds nothing evictable, further calls are a
+    // no-op until the map actually grows past that size again — without this, a map that's full
+    // of keys all still legitimately in use (e.g. many concurrent in-flight sends) would pay for
+    // a full linear rescan on every single call, with a guaranteed empty result each time.
     private fun evictStaleLocksIfNeeded(currentKey: String) {
-        if (locks.size <= maxEntries + maxEntries / 2) return
+        val size = locks.size
+        if (size <= maxEntries + maxEntries / 2) return
+        if (size <= locksSizeAtLastEviction.get()) return
+        locksSizeAtLastEviction.set(size)
         locks.keys
             .filter { it != currentKey && !sentAt.containsKey(it) }
             .toList()

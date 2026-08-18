@@ -2,8 +2,8 @@ package com.ritense.valtimoplugins.graphmail
 
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 // Default token cache capacity — override via constructor parameter.
 // Increase if the deployment manages more than 64 distinct Entra app registrations.
@@ -25,9 +25,11 @@ private const val DEFAULT_MAX_CACHED_TOKENS = 64
  * - Cache hits never block (plain map read).
  * - Concurrent misses for the same key collapse into a single fetch via a per-key lock.
  * - Lock eviction only removes a lock that is provably free right now (`tryLock` succeeds),
- *   never merely "not yet in the token cache" — a key mid-fetch is legitimately lock-held
- *   but not yet cached, and evicting it would hand a second thread a *different* Lock
- *   instance for the same key, defeating the mutual exclusion this class exists to provide.
+ *   never merely "not yet in the token cache" — a key mid-fetch is legitimately lock-held but
+ *   not yet cached. Even so, a lock can be evicted in the narrow window between a caller
+ *   reading it from the map and actually acquiring it; [lockFor] re-validates identity after
+ *   locking and retries if it lost that race, so two callers can never end up holding two
+ *   different Lock instances for the same key.
  */
 class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKENS) {
 
@@ -40,6 +42,10 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
     private val tokens = ConcurrentHashMap<String, CachedToken>()
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
+    // Size of `locks` at the last eviction scan that found nothing to remove — see
+    // evictStaleLocksIfNeeded.
+    private val locksSizeAtLastEviction = AtomicInteger(0)
+
     private fun freshToken(key: String): String? =
         tokens[key]?.takeIf { Instant.now().isBefore(it.expiresAt) }?.token
 
@@ -50,12 +56,16 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
      */
     fun getOrFetch(key: String, fetch: () -> Pair<String, Instant>): String {
         freshToken(key)?.let { return it }
-        return lockFor(key).withLock {
-            freshToken(key)?.let { return@withLock it }
+        val lock = lockFor(key)
+        try {
+            freshToken(key)?.let { return it }
             val (token, expiresAt) = fetch()
             evictIfFull()
             tokens[key] = CachedToken(token, expiresAt, Instant.now())
-            token
+            return token
+        } finally {
+            lock.unlock()
+            evictStaleLocksIfNeeded(key)
         }
     }
 
@@ -73,11 +83,34 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
         return count
     }
 
-    private fun lockFor(key: String): ReentrantLock =
-        locks.computeIfAbsent(key) { ReentrantLock() }.also { evictStaleLocksIfNeeded(key) }
+    // Returns a Lock for `key`, held (locked) by the caller on return — the caller must unlock
+    // it. Acquires and validates in a loop rather than a single computeIfAbsent+lock: a lock is
+    // only ever evicted while free (tryLock succeeds in evictStaleLocksIfNeeded), so there is a
+    // narrow window between us reading the map's current instance and actually locking it where
+    // a concurrent eviction (triggered by a *different* key's call) can slip in, remove it, and
+    // leave us holding an orphaned Lock that a later caller for the same key will never see —
+    // two callers would then hold two different Lock objects for one key, and the exclusion this
+    // class exists to provide is gone. Re-checking identity against the live map entry after
+    // locking closes that window: if it no longer matches, our lock was orphaned mid-acquisition,
+    // so we drop it and retry against whatever is current.
+    private fun lockFor(key: String): ReentrantLock {
+        while (true) {
+            val lock = locks.computeIfAbsent(key) { ReentrantLock() }
+            lock.lock()
+            if (locks[key] === lock) return lock
+            lock.unlock()
+        }
+    }
 
+    // Bounded: once a scan at a given map size finds nothing evictable, further calls are a
+    // no-op until the map actually grows past that size again — without this, a map that's full
+    // of keys all still legitimately in use would pay for a full linear rescan on every single
+    // call, with a guaranteed empty result each time.
     private fun evictStaleLocksIfNeeded(currentKey: String) {
-        if (locks.size <= maxCachedTokens + maxCachedTokens / 2) return
+        val size = locks.size
+        if (size <= maxCachedTokens + maxCachedTokens / 2) return
+        if (size <= locksSizeAtLastEviction.get()) return
+        locksSizeAtLastEviction.set(size)
         locks.keys
             .filter { it != currentKey && !tokens.containsKey(it) }
             .toList()
