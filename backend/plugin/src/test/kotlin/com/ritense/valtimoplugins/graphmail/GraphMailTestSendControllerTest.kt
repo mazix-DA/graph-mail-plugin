@@ -32,6 +32,8 @@ import org.mockito.kotlin.whenever
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.Authentication
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 private const val VALID_CONFIG_ID = "11111111-1111-1111-1111-111111111111"
 private const val VALID_RECIPIENT = "recipient@test.nl"
@@ -179,6 +181,30 @@ class GraphMailTestSendControllerTest {
         val secondResponse = send()
         assertEquals(HttpStatus.TOO_MANY_REQUESTS, secondResponse.statusCode)
         assertEquals(429, secondResponse.body!!.statusCode)
+    }
+
+    @Test fun `evicts stale rate limit entries once the store grows large`() {
+        stubPlugin()
+        val field = GraphMailTestSendController::class.java.getDeclaredField("rateLimitStore")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val store = field.get(controller) as ConcurrentHashMap<String, AtomicLong>
+
+        // Mirrors the private RATE_LIMIT_INTERVAL_MS / RATE_LIMIT_STORE_MAX_ENTRIES constants in
+        // GraphMailTestSendController.kt. Pre-populate the store with entries that are already
+        // stale (older than the rate-limit window) to simulate a long-running instance that many
+        // distinct admins have used over time.
+        val rateLimitIntervalMs = 10_000L
+        val rateLimitStoreMaxEntries = 1_000
+        val staleTimestamp = System.currentTimeMillis() - rateLimitIntervalMs - 1_000
+        repeat(rateLimitStoreMaxEntries) { i -> store["stale-user-$i"] = AtomicLong(staleTimestamp) }
+        assertEquals(rateLimitStoreMaxEntries, store.size)
+
+        // The next request — from any user — crosses the size threshold and triggers the sweep;
+        // every pre-populated stale entry should be evicted, leaving only the new caller's entry.
+        send()
+
+        assertTrue(store.size < rateLimitStoreMaxEntries)
     }
 
     @Test fun `passes decrypted credentials from plugin instance to mailClient`() {
