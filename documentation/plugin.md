@@ -23,7 +23,14 @@ Maak een pluginconfiguratie aan in Valtimo via **Admin → Plugins → Graph Mai
 | `tenantId` | Azure Directory (tenant) ID | Ja |
 | `clientId` | Azure Application (client) ID | Ja |
 | `clientSecret` | Client secret van de App Registration | Ja |
+| `allowedSenders` | Whitelist van toegestane afzenders: kommagescheiden volledige adressen (`noreply@gemeente.nl`) en/of domein-entries (`@gemeente.nl`) | Ja |
 | `testSenderMailbox` | Standaard afzenderadres voor de test-send functie | Nee |
+
+### Afzender-whitelist (`allowedSenders`)
+
+De plugin hanteert **deny-by-default**: elke verzending wordt geweigerd tenzij het (eventueel via een procesvariabele aangeleverde) `senderMailbox`-adres voorkomt op de whitelist. Matching is hoofdletterongevoelig; een domein-entry (`@gemeente.nl`) staat het hele domein toe maar géén subdomeinen. De whitelist geldt ook voor het test-send endpoint.
+
+> **Migratie:** pluginconfiguraties die vóór de introductie van `allowedSenders` zijn aangemaakt, weigeren na de upgrade elke verzending totdat de whitelist eenmalig is ingevuld en opgeslagen.
 
 ## Actie: send-email
 
@@ -31,7 +38,7 @@ Verstuur een e-mail vanuit een BPMN-serviceTask.
 
 | Parameter | Beschrijving | Verplicht |
 |-----------|-------------|-----------|
-| `senderMailbox` | E-mailadres van de afzender | Ja |
+| `senderMailbox` | E-mailadres van de afzender — moet voorkomen op de `allowedSenders`-whitelist van de pluginconfiguratie | Ja |
 | `recipients` | Ontvangers — enkelvoudig adres, kommalijst of JSON-array | Ja |
 | `cc` | CC-ontvangers | Nee |
 | `bcc` | BCC-ontvangers | Nee |
@@ -100,4 +107,4 @@ Bij minder dan 20 threads loop je een reëel risico op een vastgelopen job-execu
 
 ## Test-send
 
-Via de pluginconfiguratiepagina in Valtimo kan een testmail worden verstuurd om te verifiëren dat de Azure-credentials correct zijn geconfigureerd. Dit vereist de rol `ROLE_ADMIN`.
+Via de pluginconfiguratiepagina in Valtimo kan een testmail worden verstuurd om te verifiëren dat de Azure-credentials correct zijn geconfigureerd. Dit vereist de rol `ROLE_ADMIN`. De afzender van de testmail moet — net als bij de `send-email`-actie — voorkomen op de `allowedSenders`-whitelist van de pluginconfiguratie.
