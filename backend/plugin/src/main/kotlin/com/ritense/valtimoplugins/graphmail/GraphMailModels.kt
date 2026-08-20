@@ -36,7 +36,12 @@ data class GraphCredentials(
     val tenantId: String,
     val clientId: String,
     val clientSecret: String,
-)
+) {
+    // Kotlin's generated toString() would otherwise print clientSecret in plaintext — override
+    // it so an accidental debug log statement, or a failed test assertion printing this object,
+    // can never leak the secret.
+    override fun toString(): String = "GraphCredentials(tenantId=$tenantId, clientId=$clientId, clientSecret=***)"
+}
 
 // Everything needed to send one email via Graph, grouped for the same reason as
 // [GraphCredentials]. Optional recipient lists and saveToSentItems default so callers only

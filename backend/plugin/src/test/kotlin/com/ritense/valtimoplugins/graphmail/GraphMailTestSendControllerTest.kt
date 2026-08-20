@@ -153,6 +153,15 @@ class GraphMailTestSendControllerTest {
         verify(eventPublisher).publishEvent(any<GraphMailEmailSentEvent>())
     }
 
+    @Test fun `masks senderMailbox in the published GraphMailEmailSentEvent`() {
+        stubPlugin()
+        val captor = argumentCaptor<GraphMailEmailSentEvent>()
+        send()
+        verify(eventPublisher).publishEvent(captor.capture())
+        assertFalse(captor.firstValue.senderMailbox.contains(VALID_SENDER))
+        assertTrue(captor.firstValue.senderMailbox.contains("***"))
+    }
+
     @Test fun `rate limits same user within 10 seconds`() {
         stubPlugin()
         send() // first call succeeds
