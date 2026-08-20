@@ -16,6 +16,14 @@ pluginManagement {
     val lalakiCentralVersion: String by settings
     val ktlintVersion: String by settings
 
+    // `cn.lalaki.central` is not published to the Gradle Plugin Portal; the portal only
+    // reaches it by proxying Maven Central, which intermittently fails. Declare Maven
+    // Central explicitly so plugin resolution does not depend on that proxy.
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+
     plugins {
         // Idea
         idea
