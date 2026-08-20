@@ -7,10 +7,10 @@ Verstuur e-mails via de Microsoft Graph API met OAuth2 (Client Credentials flow)
 Een **Azure App Registration** met de volgende instellingen:
 
 - Applicatiemachtiging: `Mail.Send` (niet delegated) — vereist voor alle e-mailverzendingen
-- Applicatiemachtiging: `Mail.ReadWrite` (niet delegated) — **alleen** vereist voor bijlagen groter dan 2 MiB; de plugin maakt dan eerst een conceptbericht aan via de Graph API upload-sessie flow
+- Applicatiemachtiging: `Mail.ReadWrite` (niet delegated) — **alleen** vereist zodra één losse bijlage óf het totaal van alle bijlagen samen groter is dan 2 MiB; de plugin maakt dan eerst een conceptbericht aan via de Graph API upload-sessie flow
 - Een client secret aangemaakt onder *Certificates & secrets*
 
-> **Least privilege:** ken `Mail.ReadWrite` alleen toe als je daadwerkelijk bijlagen groter dan 2 MiB verstuurt. Voor e-mails zonder bijlagen of met bijlagen tot 2 MiB is `Mail.Send` voldoende. `Mail.ReadWrite` als application permission geeft de app lees-, wijzig- en verwijderrechten op *alle* mailboxen in de tenant — laat deze machtiging weg waar mogelijk. Zonder `Mail.ReadWrite` mislukt het versturen van bijlagen groter dan 2 MiB met een 403-fout.
+> **Least privilege:** ken `Mail.ReadWrite` alleen toe als je daadwerkelijk bijlagen boven die drempel verstuurt. Voor e-mails zonder bijlagen, of waarbij zowel elke losse bijlage als het totaal 2 MiB of kleiner is, is `Mail.Send` voldoende. `Mail.ReadWrite` als application permission geeft de app lees-, wijzig- en verwijderrechten op *alle* mailboxen in de tenant — laat deze machtiging weg waar mogelijk. Zonder `Mail.ReadWrite` mislukt het versturen van bijlagen groter dan 2 MiB met een 403-fout.
 
 > **Beheerdersconsent vereist:** `Mail.Send` en `Mail.ReadWrite` zijn *applicatiemachtigingen* (niet delegated). Deze kunnen in Microsoft Entra ID niet door een gewone gebruiker worden toegekend — een tenant-/Entra-beheerder moet de machtigingen verlenen én er admin consent voor geven. Stem dit dus af met de beheerder van je organisatie voordat de plugin in gebruik wordt genomen. Ken alleen de strikt benodigde machtigingen toe (`Mail.Send`, en `Mail.ReadWrite` uitsluitend als je bijlagen groter dan 2 MiB verstuurt).
 
