@@ -43,7 +43,12 @@ dependencies {
     compileOnly("io.github.oshai:kotlin-logging:$kotlinLoggingVersion")
     compileOnly("com.ritense.valtimo:temporary-resource-storage")
     compileOnly("org.springframework.boot:spring-boot-starter-security")
-    implementation("org.jsoup:jsoup:1.17.2")
+    // 1.23.1 fixes CVE-2026-71497 (Cleaner XSS bypass via a malformed tag name ending in a
+    // control character, for custom Safelists that permit raw-text elements). Our
+    // EMAIL_HTML_SAFELIST in GraphMailPlugin.kt does not add any raw-text elements, so this
+    // plugin's usage was not exploitable — pinned to the patched version regardless, since
+    // this is the library the plugin's HTML sanitization relies on.
+    implementation("org.jsoup:jsoup:1.23.1")
 
     // Testing
     testImplementation("com.ritense.valtimo:plugin-valtimo")
