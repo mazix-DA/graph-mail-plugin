@@ -18,6 +18,7 @@ package com.ritense.valtimoplugins.graphmail
 import com.ritense.resource.service.TemporaryResourceStorageService
 import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -55,7 +56,11 @@ class GraphMailPluginTest {
             allowedSenders = "@test.nl"
         }
         whenever(execution.id).thenReturn("execution-1")
+        whenever(execution.processInstanceId).thenReturn("process-1")
         whenever(execution.currentActivityId).thenReturn("send-email-task")
+        // The duplicate guard keys on the activity *instance*, which is what distinguishes a
+        // retry of one attempt from a fresh pass over the same task in a loop.
+        whenever(execution.activityInstanceId).thenReturn("send-email-task:instance-1")
         // thenAnswer (not thenReturn) — a fresh stream per call, matching a real storage
         // service; thenReturn would hand back the same already-consumed/closed stream on a
         // second sendEmail() call within one test (e.g. the idempotency retry tests below).
@@ -463,11 +468,79 @@ class GraphMailPluginTest {
         verify(mailClient, times(1)).sendMail(any(), any())
     }
 
-    @Test fun `a different activity instance on the same execution is not treated as a duplicate`() {
-        // Same process execution, different activity (e.g. a second send-email task in a loop) —
-        // must not be mistaken for a retry of the first.
+    // ── HTML sanitisation of inline style values ─────────────────────────────
+
+    @Test fun `an inline style url is stripped but the rest of the styling survives`() {
+        // <style> blocks are excluded precisely because CSS url() fetches an external resource — a
+        // tracking pixel in GDPR terms. Allowing the style *attribute* let the same thing straight
+        // back in, since jsoup's Safelist filters attribute names and not their values.
+        mockBodyHtml("""<div style="color:#333;background:url(https://tracker.example/p.png)">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        val body = captor.firstValue.bodyHtml
+        assertFalse(body.contains("tracker.example"), "external url() survived sanitisation: $body")
+        assertTrue(body.contains("color:#333"), "legitimate styling was thrown away: $body")
+    }
+
+    @Test fun `an inline style data uri background is stripped`() {
+        mockBodyHtml("""<div style="background:url(data:image/svg+xml;base64,AAAA)">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertFalse(captor.firstValue.bodyHtml.contains("data:image"))
+    }
+
+    @Test fun `an inline style import is stripped`() {
+        mockBodyHtml("""<div style="@import url(https://evil.example/x.css);color:red">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        val body = captor.firstValue.bodyHtml
+        assertFalse(body.contains("evil.example"))
+        assertTrue(body.contains("color:red"))
+    }
+
+    @Test fun `a second loop iteration over the same activity is not treated as a duplicate`() {
+        // Regression: the guard used to key on execution.id + currentActivityId. A flow that loops
+        // back to the same service task keeps both values, so every iteration after the first was
+        // silently dropped — the process carried on as if the email had gone out.
+        send()
+
+        whenever(execution.activityInstanceId).thenReturn("send-email-task:instance-2")
+        send()
+
+        verify(mailClient, times(2)).sendMail(any(), any())
+    }
+
+    @Test fun `a retry of the same activity instance is still suppressed`() {
+        send()
+        send()
+
+        verify(mailClient, times(1)).sendMail(any(), any())
+    }
+
+    @Test fun `falls back to the execution key when no activity instance id is available`() {
+        whenever(execution.activityInstanceId).thenReturn(null)
+
+        send()
+        send()
+
+        verify(mailClient, times(1)).sendMail(any(), any())
+    }
+
+    @Test fun `a different activity on the same execution is not treated as a duplicate`() {
+        // Same process execution, different activity (e.g. a second send-email task later in the
+        // flow) — must not be mistaken for a retry of the first.
         send()
         whenever(execution.currentActivityId).thenReturn("send-email-task-2")
+        whenever(execution.activityInstanceId).thenReturn("send-email-task-2:instance-1")
         send()
         verify(mailClient, times(2)).sendMail(any(), any())
     }

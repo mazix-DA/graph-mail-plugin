@@ -1,6 +1,5 @@
 package com.ritense.valtimoplugins.graphmail
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.ritense.plugin.annotation.Plugin
 import com.ritense.plugin.annotation.PluginAction
 import com.ritense.plugin.annotation.PluginActionProperty
@@ -11,12 +10,8 @@ import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
 import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.slf4j.LoggerFactory
-import org.springframework.boot.web.client.RestTemplateBuilder
 import org.springframework.context.ApplicationEventPublisher
-import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
-import org.springframework.web.client.RestClient
 import java.io.ByteArrayOutputStream
-import java.time.Duration
 
 private const val MAX_RECIPIENTS_PER_FIELD = 100
 private const val MAX_RECIPIENTS_TOTAL = 200
@@ -41,8 +36,29 @@ private val EMAIL_HTML_SAFELIST: Safelist = Safelist.relaxed()
 
 private val EMAIL_OUTPUT_SETTINGS = org.jsoup.nodes.Document.OutputSettings().prettyPrint(false)
 
-private fun sanitizeHtml(html: String): String =
-    Jsoup.clean(html, "", EMAIL_HTML_SAFELIST, EMAIL_OUTPUT_SETTINGS)
+// jsoup's Safelist filters attribute *names*, not their values, so allowing `style` above lets
+// through exactly the constructs the <style>-block exclusion exists to prevent: url() fetches an
+// external resource (a tracking pixel, in GDPR terms), @import pulls in a remote stylesheet, and
+// a data: URI in a background sneaks past the deliberate exclusion of data: from img src.
+private val CSS_EXTERNAL_REF_REGEX =
+    Regex("""(url\s*\(|@import|expression\s*\(|javascript\s*:)""", RegexOption.IGNORE_CASE)
+
+private fun sanitizeHtml(html: String): String {
+    val cleaned = Jsoup.clean(html, "", EMAIL_HTML_SAFELIST, EMAIL_OUTPUT_SETTINGS)
+    val doc = Jsoup.parseBodyFragment(cleaned)
+    doc.outputSettings(EMAIL_OUTPUT_SETTINGS)
+    doc.select("[style]").forEach { element ->
+        val style = element.attr("style")
+        if (!CSS_EXTERNAL_REF_REGEX.containsMatchIn(style)) return@forEach
+        // Drop only the offending declarations; the rest of the inline styling is what makes
+        // transactional email render at all, so throwing the whole attribute away is too blunt.
+        val kept = style.split(';')
+            .filter { it.isNotBlank() && !CSS_EXTERNAL_REF_REGEX.containsMatchIn(it) }
+            .joinToString(";")
+        if (kept.isBlank()) element.removeAttr("style") else element.attr("style", kept)
+    }
+    return doc.body().html()
+}
 
 // Splits a plugin action property into individual string values.
 // Supports three formats so process designers can use whichever is most convenient:
@@ -79,43 +95,20 @@ private fun parseRecipients(values: List<String>, fieldName: String): List<Graph
     description = "Send emails via Microsoft Graph API with OAuth2 (Client Credentials)",
 )
 class GraphMailPlugin(
-    private val restTemplateBuilder: RestTemplateBuilder,
-    private val objectMapper: ObjectMapper,
+    // Injected, never built here. Valtimo hydrates a fresh GraphMailPlugin per action invocation,
+    // so a client constructed in this class would mean a new RestTemplate, a new message converter
+    // and — decisively — a brand new connection pool for every single email. That is one full TLS
+    // handshake per message and no connection reuse whatsoever. Sharing one pooled client across
+    // invocations is the single largest throughput win available to this plugin.
+    private val client: GraphMailClient,
     private val resourceStorageService: TemporaryResourceStorageService,
     private val eventPublisher: ApplicationEventPublisher,
     // Shared across all plugin instances by GraphMailAutoConfiguration/GraphMailPluginFactory —
-    // see GraphTokenCache's class doc for why this must be injected rather than built per instance.
-    private val graphTokenCache: GraphTokenCache = GraphTokenCache(),
-    // Same sharing requirement as graphTokenCache above — see SendIdempotencyGuard's class doc.
+    // see SendIdempotencyGuard's class doc for why this must be injected rather than built here.
     private val sendIdempotencyGuard: SendIdempotencyGuard = SendIdempotencyGuard(),
+    // Bounds peak attachment heap independently of the job-executor pool size — see its class doc.
+    private val attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter = AttachmentConcurrencyLimiter(),
 ) {
-    // Only set by the internal test constructor — overrides the lazy-built client.
-    private var clientOverride: GraphMailClient? = null
-
-    // Initialized lazily so that @PluginProperty values (tokenBaseUrl, graphBaseUrl,
-    // connectTimeoutSeconds, readTimeoutSeconds) are already injected by Valtimo before
-    // the first sendEmail() call triggers this block.
-    private val client: GraphMailClient by lazy {
-        clientOverride ?: run {
-            val rt = restTemplateBuilder
-                .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
-                .readTimeout(Duration.ofSeconds(readTimeoutSeconds))
-                .build()
-            rt.messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
-            rt.messageConverters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
-            GraphMailClientImpl(RestClient.create(rt), tokenBaseUrl, graphBaseUrl, graphTokenCache)
-        }
-    }
-
-    // Unit-test backdoor: avoids needing a real RestTemplateBuilder / ObjectMapper in tests.
-    internal constructor(
-        graphMailClient: GraphMailClient,
-        resourceStorageService: TemporaryResourceStorageService,
-        eventPublisher: ApplicationEventPublisher,
-    ) : this(RestTemplateBuilder(), ObjectMapper(), resourceStorageService, eventPublisher) {
-        this.clientOverride = graphMailClient
-    }
-
     private val logger = LoggerFactory.getLogger(GraphMailPlugin::class.java)
 
     // Dedicated audit logger — configure appenders/log levels separately in logback.xml if needed.
@@ -143,17 +136,10 @@ class GraphMailPlugin(
     @PluginProperty(key = "testSenderMailbox", secret = false, required = false)
     var testSenderMailbox: String? = null
 
-    @PluginProperty(key = "tokenBaseUrl", secret = false, required = false)
-    var tokenBaseUrl: String = "https://login.microsoftonline.com"
-
-    @PluginProperty(key = "graphBaseUrl", secret = false, required = false)
-    var graphBaseUrl: String = "https://graph.microsoft.com"
-
-    @PluginProperty(key = "connectTimeoutSeconds", secret = false, required = false)
-    var connectTimeoutSeconds: Long = 10
-
-    @PluginProperty(key = "readTimeoutSeconds", secret = false, required = false)
-    var readTimeoutSeconds: Long = 30
+    // tokenBaseUrl, graphBaseUrl, connectTimeoutSeconds and readTimeoutSeconds used to live here as
+    // @PluginProperty fields. They are now deployment settings under `graph-mail.http` — see
+    // GraphMailHttpProperties for why an admin-editable tokenBaseUrl was a way to walk off with the
+    // client secret, and why endpoints belong to the deployment rather than to a configuration row.
 
     // NOTE: SERVICE_TASK_START fires when the service task begins executing, on the
     // Operaton job-executor thread. If the surrounding transaction rolls back and retries
@@ -197,10 +183,7 @@ class GraphMailPlugin(
                 "Add the permitted sender mailboxes (or '@domain' entries) to the Graph Mail plugin configuration"
         }
 
-        // Stable across a job-executor retry of the same activity (same execution, same
-        // activity), but distinct per activity so an execution that sends multiple emails
-        // across its lifetime (e.g. a loop) is never mistaken for a duplicate.
-        val idempotencyKey = "${execution.id}:${execution.currentActivityId}"
+        val idempotencyKey = idempotencyKeyFor(execution)
 
         // Cheap early exit for the common case — a sequential retry after the surrounding
         // transaction rolled back — that skips all validation and resource resolution below,
@@ -269,26 +252,30 @@ class GraphMailPlugin(
 
                 val auditStart = System.currentTimeMillis()
                 try {
-                    client.sendMail(
-                        credentials =
-                            GraphCredentials(
-                                tenantId = tenantId,
-                                clientId = clientId,
-                                clientSecret = clientSecret,
-                            ),
-                        mail =
-                            OutboundMail(
-                                senderMailbox = senderMailbox,
-                                toRecipients = toRecipients,
-                                ccRecipients = ccRecipients,
-                                bccRecipients = bccRecipients,
-                                replyToRecipients = replyToRecipients,
-                                subject = subject,
-                                bodyHtml = safeBodyHtml,
-                                attachments = attachments,
-                                saveToSentItems = true,
-                            ),
-                    )
+                    // Only attachment-carrying sends queue for a slot; plain sends are unbounded
+                    // because their memory footprint is negligible.
+                    attachmentConcurrencyLimiter.withPermit(attachments.isNotEmpty()) {
+                        client.sendMail(
+                            credentials =
+                                GraphCredentials(
+                                    tenantId = tenantId,
+                                    clientId = clientId,
+                                    clientSecret = clientSecret,
+                                ),
+                            mail =
+                                OutboundMail(
+                                    senderMailbox = senderMailbox,
+                                    toRecipients = toRecipients,
+                                    ccRecipients = ccRecipients,
+                                    bccRecipients = bccRecipients,
+                                    replyToRecipients = replyToRecipients,
+                                    subject = subject,
+                                    bodyHtml = safeBodyHtml,
+                                    attachments = attachments,
+                                    saveToSentItems = true,
+                                ),
+                        )
+                    }
                     val durationMs = System.currentTimeMillis() - auditStart
                     auditLogger.info(
                         "SEND_OK sender={} to={} cc={} bcc={} subject_len={} attachments={} duration_ms={}",
@@ -312,13 +299,17 @@ class GraphMailPlugin(
                     )
                 } catch (ex: Exception) {
                     val durationMs = System.currentTimeMillis() - auditStart
+                    // Spell out the retry verdict. Every failure used to look identical in the logs,
+                    // leaving an administrator with no way to tell "wait for this to clear" apart
+                    // from "go change something" until the incident showed up.
                     auditLogger.warn(
-                        "SEND_FAIL sender={} to={} subject_len={} duration_ms={} error={}",
+                        "SEND_FAIL sender={} to={} subject_len={} duration_ms={} verdict={} error={}",
                         maskEmail(senderMailbox),
                         maskEmails(toRecipients.map { it.emailAddress.address }),
                         subject.length,
                         durationMs,
-                        ex.message,
+                        retryVerdictOf(ex),
+                        maskEmailsInText(ex.message),
                     )
                     publishEventSafely(
                         GraphMailEmailFailedEvent(
@@ -340,6 +331,50 @@ class GraphMailPlugin(
                 idempotencyKey,
             )
         }
+    }
+
+    // How an administrator reading the audit log should read this failure. Deliberately a log
+    // field rather than a different exception type reaching the engine: turning permanent failures
+    // into a BpmnError would change process semantics for every existing model, and an uncaught
+    // BpmnError degrades into a "no catching boundary event found" incident whose message is less
+    // useful than the one thrown here. Routing these through a boundary error event is a process
+    // design decision, not something this plugin should impose — see documentation/plugin.md.
+    private fun retryVerdictOf(ex: Throwable): String = when (ex) {
+        is IllegalArgumentException, is IllegalStateException ->
+            "PERMANENT_INPUT — retrying will fail identically; correct the process data or the plugin configuration"
+        is GraphMailPermanentException ->
+            "PERMANENT_REMOTE — Graph rejected this permanently; a configuration or permission change is required"
+        is GraphMailUnknownOutcomeException ->
+            "UNKNOWN — the message MAY have been sent; verify the mailbox before re-running this activity"
+        is GraphMailRetryableException ->
+            "TRANSIENT — safe to retry; the job executor will reschedule"
+        else -> "UNCLASSIFIED"
+    }
+
+    // Identifies one *attempt at one activity instance*, which is exactly the granularity the
+    // duplicate guard needs: stable across a job-executor retry of the same activity instance
+    // (the id is assigned when the execution enters the activity and is persisted with it, so a
+    // rolled-back-and-retried attempt reads back the same value), but freshly generated for every
+    // new iteration of a loop or multi-instance marker.
+    //
+    // The previous key, "${execution.id}:${execution.currentActivityId}", was NOT that: a flow
+    // that loops back to the same service task reuses both values, so every iteration after the
+    // first was silently suppressed as a duplicate for the lifetime of the guard's TTL.
+    private fun idempotencyKeyFor(execution: DelegateExecution): String {
+        val activityInstanceId = execution.activityInstanceId
+        if (!activityInstanceId.isNullOrBlank()) {
+            return "${execution.processInstanceId}:$activityInstanceId"
+        }
+        // Defensive fallback for delegates invoked without activity-instance context (custom
+        // test harnesses, non-standard invocation paths). Coarser: it cannot tell a legitimate
+        // second pass over the same activity apart from a retry of the first one.
+        logger.warn(
+            "No activityInstanceId available for execution [{}] — falling back to the " +
+                "execution+activity key; duplicate suppression is coarser in this mode and a " +
+                "loop over the same service task may be suppressed",
+            execution.id,
+        )
+        return "${execution.id}:${execution.currentActivityId}"
     }
 
     // Empty when the property is missing (pre-allowlist configurations) — callers treat

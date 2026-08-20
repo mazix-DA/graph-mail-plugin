@@ -252,7 +252,8 @@ class GraphMailTestSendControllerTest {
         stubPlugin()
         stubSendMail().thenThrow(GraphMailTokenExpiredException("token expired"))
         val response = send()
-        assertEquals(HttpStatus.UNAUTHORIZED, response.statusCode)
+        // Upstream 401 is surfaced as 502: Graph refused OUR token, the admin's session is fine.
+        assertEquals(HttpStatus.BAD_GATEWAY, response.statusCode)
         assertFalse(response.body!!.success)
         assertEquals(401, response.body!!.statusCode)
         assertTrue(response.body!!.message.contains("Client Secret"))

@@ -2,6 +2,71 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.5
+
+Vervolg op een diepgaande review van de plugin. Bevat twee correctheidsfixes met direct effect op
+verzonden e-mail, een security-hardening met een migratiestap, en de eerste echte
+performance-ingreep.
+
+**Breaking — pluginproperties verplaatst naar applicatieconfiguratie**
+`tokenBaseUrl`, `graphBaseUrl`, `connectTimeoutSeconds` en `readTimeoutSeconds` zijn geen
+`@PluginProperty` meer en staan nu onder `graph-mail.http` in `application.yml`. Bestaande
+pluginconfiguraties met afwijkende waarden negeren die na deze upgrade — zet ze om naar de
+applicatieconfiguratie. Zie `documentation/plugin.md` voor het volledige blok.
+
+Reden: het client secret wordt als formulierveld naar `tokenBaseUrl` gePOST. Zolang die property
+vanuit de beheer-UI instelbaar was, kon iedereen die pluginconfiguraties mocht beheren het secret
+naar een eigen host laten sturen. `graphBaseUrl` gaf bovendien een SSRF-primitief, en de
+hostvalidatie van de upload-URL leidde haar verwachte host áf uit `graphBaseUrl` — waardoor die
+controle in productie precies zo sterk was als de waarde die een beheerder invulde. De endpoints
+worden nu bij opstarten gevalideerd tegen een vaste allowlist van Microsoft-endpoints.
+
+**Correctheid**
+- Loop over dezelfde service task verstuurde alleen de eerste e-mail. De duplicaat-guard sleutelde
+  op `execution.id` + `currentActivityId`; een flow die terugloopt naar dezelfde task hergebruikt
+  beide waarden, waardoor elke volgende iteratie 30 minuten lang stil werd overgeslagen — het
+  proces liep door alsof de mail verstuurd was. De sleutel is nu de activity-*instantie*, die wel
+  stabiel is over een job-executor retry maar uniek per iteratie.
+- Transportfouten op een verzendaanroep worden niet meer automatisch opnieuw geprobeerd. Een
+  read-timeout zegt niets over of Graph het bericht al accepteerde; de retry (tot 5×) kon de
+  ontvanger meerdere kopieën bezorgen. Conceptaanmaak en upload-sessies zijn wél herhaalbaar en
+  blijven retryen. De onzekere uitkomst is herkenbaar als `verdict=UNKNOWN` in de auditlog.
+- De 401-refresh garandeert nu een daadwerkelijk nieuw token. Invalideren-en-opnieuw-lezen kon
+  hetzelfde geweigerde token terugkrijgen als een andere thread het net had teruggeschreven,
+  waarna de fout werd gerapporteerd als een ontbrekende `Mail.Send`-permissie.
+- Opruimen van een concept gebeurt niet meer ná de verzendaanroep. Een geslaagde verzending die op
+  het antwoord time-oute liet de opruimactie het bericht uit Verzonden items verwijderen.
+- 429 tijdens een chunk-upload wordt nu geretryd in plaats van de hele upload en het concept weg te
+  gooien; de upload volgt daarbij `nextExpectedRanges` van de server in plaats van blind door te
+  tellen op de eigen offset.
+- De token-fetch respecteert nu de deadline van de verzending. De "harde" wandkloklimiet van 30s
+  kon eerder met tientallen seconden overschreden worden door de eigen retry-loop van de
+  token-aanvraag.
+
+**Security**
+- Binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en
+  `javascript:` weggefilterd. `<style>`-blokken werden geweerd juist omdát die externe requests
+  kunnen triggeren, terwijl `style="background:url(...)"` dezelfde tracking-pixel alsnog toeliet.
+- Het test-send endpoint geeft een Graph-401 niet langer door als HTTP 401 — dat liet de
+  auth-interceptor van de frontend de beheerder uitloggen bij niets meer dan een verkeerd getypt
+  client secret. Het wordt nu een 502; de Graph-status blijft in de response body staan.
+- Ruwe exception-teksten uit het test-send endpoint worden gemaskeerd op e-mailadressen, net als op
+  het plugin-actiepad al gebeurde.
+
+**Performance**
+- Eén gedeelde, gepoolde HTTP-client voor alle verzendingen. Valtimo hydrateert een nieuwe
+  plugin-instantie per actie, waardoor er per e-mail een complete nieuwe `RestTemplate` met eigen
+  connection manager werd opgebouwd: één volledige TLS-handshake per bericht en nul hergebruik van
+  verbindingen.
+- `graph-mail.http.attachment-concurrency` begrenst het aantal gelijktijdige verzendingen mét
+  bijlagen. Dat aantal was eerder gelijk aan de grootte van de job-executor thread-pool; bij de door
+  de plugin zelf geadviseerde `max-pool-size: 50` is dat een `OutOfMemoryError`.
+
+**Diagnostiek**
+- Elke mislukte verzending logt een `verdict` (`PERMANENT_INPUT`, `PERMANENT_REMOTE`, `UNKNOWN`,
+  `TRANSIENT`) plus een concrete remedie per HTTP-status, zodat een beheerder in de GZAC-logs kan
+  zien of hij moet wachten of iets moet aanpassen.
+
 ## 1.0.4
 Bescherming tegen dubbele e-mailverzending bij een Operaton-transactieretry, inclusief twee
 rondes correcties op de concurrency-correctheid van die bescherming zelf.

@@ -7,14 +7,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.event.ApplicationReadyEvent
-import org.springframework.boot.web.client.RestTemplateBuilder
+import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.context.annotation.Bean
 import org.springframework.context.event.EventListener
 import org.springframework.core.annotation.Order
+import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
-import org.springframework.web.client.RestTemplate
+import java.net.http.HttpClient
 import java.time.Duration
 
 // IMPORTANT: this file uses line comments only, on purpose. Kotlin block comments nest, so
@@ -22,6 +23,7 @@ import java.time.Duration
 // written inside a KDoc block comment would open an inner comment that is never closed and
 // swallows the rest of the file. Keeping all doc text in line comments avoids that trap.
 @AutoConfiguration
+@EnableConfigurationProperties(GraphMailHttpProperties::class)
 class GraphMailAutoConfiguration {
 
     private val logger = LoggerFactory.getLogger(GraphMailAutoConfiguration::class.java)
@@ -34,17 +36,50 @@ class GraphMailAutoConfiguration {
     fun warnOnStartup() {
         logger.warn(
             "[Graph Mail Plugin] IMPORTANT: this plugin blocks Operaton job-executor threads during " +
-            "retry backoff (up to 30s per send, 120s for large attachments). " +
-            "Set operaton.bpm.job-executor.core-pool-size >= 20 and max-pool-size >= 50 " +
-            "to prevent job-executor starvation under load. See documentation/plugin.md for details."
+                "retry backoff (up to 30s per send, 120s for large attachments). " +
+                "Set operaton.bpm.job-executor.core-pool-size >= 20 and max-pool-size >= 50 " +
+                "to prevent job-executor starvation under load, and configure a " +
+                "failedJobRetryTimeCycle on the send-email service task. " +
+                "See documentation/plugin.md for details."
         )
+    }
+
+    // ONE pooled client for the whole application, shared by the plugin action path and the
+    // test-send endpoint alike.
+    //
+    // The JDK's own HttpClient is used rather than Apache HttpClient5 on purpose: it pools
+    // connections out of the box and ships with the JVM, so the plugin does not have to assume
+    // anything about which HTTP library the surrounding GZAC application happens to put on the
+    // classpath. RestTemplateBuilder.build() would fall back to an unpooled
+    // SimpleClientHttpRequestFactory when no third-party client is present — and, built per plugin
+    // instance as it was before, there was nothing to pool in the first place.
+    @Bean
+    @ConditionalOnMissingBean(name = ["graphMailRestClient"])
+    fun graphMailRestClient(
+        objectMapper: ObjectMapper,
+        properties: GraphMailHttpProperties,
+    ): RestClient {
+        val httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build()
+
+        val requestFactory = JdkClientHttpRequestFactory(httpClient).apply {
+            setReadTimeout(Duration.ofSeconds(properties.readTimeoutSeconds))
+        }
+
+        return RestClient.builder()
+            .requestFactory(requestFactory)
+            .messageConverters { converters ->
+                converters.removeIf { it is MappingJackson2HttpMessageConverter }
+                converters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
+            }
+            .build()
     }
 
     // Single shared instance — see GraphTokenCache's class doc for why the cache must be a
     // bean rather than something each GraphMailClientImpl owns: Valtimo hydrates a fresh
-    // GraphMailPlugin (and therefore, previously, a fresh client) per action invocation, so
-    // an instance-owned cache never accumulated hits. Both the plugin action path and the
-    // test-send controller path share this one cache, keyed by tenantId+clientId.
+    // GraphMailPlugin per action invocation, so an instance-owned cache never accumulated hits.
     @Bean
     @ConditionalOnMissingBean(GraphTokenCache::class)
     fun graphTokenCache(): GraphTokenCache = GraphTokenCache()
@@ -57,41 +92,48 @@ class GraphMailAutoConfiguration {
     @ConditionalOnMissingBean(SendIdempotencyGuard::class)
     fun sendIdempotencyGuard(): SendIdempotencyGuard = SendIdempotencyGuard()
 
+    // Must be a single instance to mean anything — a per-invocation limiter would hand every
+    // caller its own full set of permits and cap nothing at all.
+    @Bean
+    @ConditionalOnMissingBean(AttachmentConcurrencyLimiter::class)
+    fun attachmentConcurrencyLimiter(properties: GraphMailHttpProperties): AttachmentConcurrencyLimiter =
+        AttachmentConcurrencyLimiter(
+            permits = properties.attachmentConcurrency,
+            acquireTimeoutMs = properties.attachmentAcquireTimeoutSeconds * 1000,
+        )
+
     @Bean
     @ConditionalOnMissingBean(GraphMailClient::class)
     fun graphMailClient(
-        restTemplateBuilder: RestTemplateBuilder,
-        objectMapper: ObjectMapper,
+        graphMailRestClient: RestClient,
         graphTokenCache: GraphTokenCache,
-    ): GraphMailClient {
-        val restTemplate = restTemplateBuilder
-            .connectTimeout(Duration.ofSeconds(10))
-            .readTimeout(Duration.ofSeconds(30))
-            .build()
-            .also { configureJackson(it, objectMapper) }
-
-        return GraphMailClientImpl(RestClient.create(restTemplate), tokenCache = graphTokenCache)
-    }
+        properties: GraphMailHttpProperties,
+    ): GraphMailClient =
+        GraphMailClientImpl(
+            restClient = graphMailRestClient,
+            tokenBaseUrl = properties.tokenBaseUrl,
+            graphBaseUrl = properties.graphBaseUrl,
+            tokenCache = graphTokenCache,
+            requireMicrosoftUploadHost = properties.isProductionGraphEndpoint(),
+        )
 
     @Bean
     @ConditionalOnMissingBean(GraphMailPluginFactory::class)
     fun graphMailPluginFactory(
         pluginService: PluginService,
-        restTemplateBuilder: RestTemplateBuilder,
-        objectMapper: ObjectMapper,
+        graphMailClient: GraphMailClient,
         resourceStorageService: TemporaryResourceStorageService,
         eventPublisher: ApplicationEventPublisher,
-        graphTokenCache: GraphTokenCache,
         sendIdempotencyGuard: SendIdempotencyGuard,
+        attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter,
     ): GraphMailPluginFactory =
         GraphMailPluginFactory(
             pluginService,
-            restTemplateBuilder,
-            objectMapper,
+            graphMailClient,
             resourceStorageService,
             eventPublisher,
-            graphTokenCache,
             sendIdempotencyGuard,
+            attachmentConcurrencyLimiter,
         )
 
     @Bean
@@ -106,9 +148,4 @@ class GraphMailAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(GraphMailHttpSecurityConfigurer::class)
     fun graphMailHttpSecurityConfigurer(): GraphMailHttpSecurityConfigurer = GraphMailHttpSecurityConfigurer()
-
-    private fun configureJackson(restTemplate: RestTemplate, objectMapper: ObjectMapper) {
-        restTemplate.messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
-        restTemplate.messageConverters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
-    }
 }

@@ -83,10 +83,31 @@ E-mails verzonden via de `send-email` actie worden opgeslagen in de Sent Items v
 Bijlagen van 2 MiB of kleiner worden inline (base64) meegestuurd in de sendMail-aanroep (alleen `Mail.Send` nodig). Als een bijlage — of het totaal aan bijlagen — groter is dan 2 MiB, verstuurt de plugin automatisch via een Graph API upload-sessie (concept → chunked upload → verzenden); dit pad vereist `Mail.ReadWrite`. Bij de upload-sessie is het verzendtijdstip het moment van de definitieve verzendaanroep, niet het moment van conceptaanmaak.
 
 **Dubbele verzending bij transactieretry**
-De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie terugdraait en opnieuw start (bijvoorbeeld bij een optimistic lock conflict), kan de e-mail meer dan één keer worden verzonden. Mitigatie: sla een idempotency-token op als procesvariabele en dedupliceer aan de ontvangerskant.
+De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie terugdraait en opnieuw start (bijvoorbeeld bij een optimistic lock conflict), wordt de activity opnieuw uitgevoerd terwijl de e-mail al verstuurd is. De plugin dedupliceert dit zelf via een in-memory guard (`SendIdempotencyGuard`), gesleuteld op de *activity-instantie* — stabiel over een job-executor retry, maar uniek per iteratie van een loop of multi-instance, zodat een proces dat bewust meerdere mails vanaf dezelfde task verstuurt niet stilzwijgend wordt geblokkeerd.
+
+Een procesvariabele werkt hier expliciet *niet* als guard: die wordt in dezelfde transactie geschreven die terugdraait, en is dus nooit zichtbaar voor de volgende poging.
+
+Beperking: de guard is in-memory en beschermt alleen tegen een retry binnen dezelfde, nog draaiende JVM. Een applicatieherstart tussen de oorspronkelijke verzending en een latere retry valt er buiten; daarvoor is een duurzame, transactioneel onafhankelijke opslag nodig.
+
+**Transportfouten worden bewust niet opnieuw geprobeerd**
+Een netwerkfout of read-timeout op de verzendaanroep zelf (`sendMail`, `messages/{id}/send`) zegt niets over of Graph het bericht al heeft geaccepteerd. De plugin probeert die aanroep daarom **niet** automatisch opnieuw en meldt de fout als `GraphMailUnknownOutcomeException` — beter één onzekere verzending dan een gegarandeerde dubbele mail bij de ontvanger. Conceptaanmaak en het aanmaken van een upload-sessie zijn wél herhaalbaar en worden wel opnieuw geprobeerd.
+
+Controleer bij deze fout de mailbox voordat de activity opnieuw wordt uitgevoerd. In de auditlog is dit herkenbaar aan `verdict=UNKNOWN`.
+
+**Foutclassificatie in de auditlog**
+Elke mislukte verzending logt een `verdict`-veld dat aangeeft wat de beheerder moet doen:
+
+| Verdict | Betekenis |
+|---------|-----------|
+| `PERMANENT_INPUT` | Invoer- of configuratiefout; opnieuw proberen faalt identiek. Corrigeer de procesdata of de pluginconfiguratie. |
+| `PERMANENT_REMOTE` | Graph weigert dit permanent (bijv. 403 zonder `Mail.Send`, 404 onbekende mailbox). Vereist een configuratie- of permissiewijziging. |
+| `UNKNOWN` | Transportfout na verzending; de mail is mogelijk wél verstuurd. Verifieer voordat je opnieuw uitvoert. |
+| `TRANSIENT` | Tijdelijk (429/5xx/netwerk); de job-executor probeert het opnieuw. |
+
+Deze classificatie zit bewust in de logging en niet in een `BpmnError`: het omzetten van permanente fouten naar een BPMN-fout zou de procesafhandeling van elk bestaand model wijzigen, en een niet-afgevangen `BpmnError` degradeert tot een incident met de melding "no catching boundary event found" — minder bruikbaar dan de fout die de plugin nu gooit. Wil je permanente fouten in het procesmodel afvangen, gebruik dan een `failedJobRetryTimeCycle` in combinatie met een incident-handler.
 
 **HTML-body sanitisatie**
-De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met http/https/cid-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
+De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met http/https/cid-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Ook binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en `javascript:` weggefilterd — anders zou een `style="background:url(https://tracker/pixel.png)"` alsnog een externe request (tracking pixel) veroorzaken, precies waarvoor `<style>`-blokken geweerd worden. De overige stijlregels blijven intact. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
 
 **Limieten**
 
@@ -111,7 +132,30 @@ valtimo:
 
 Wie deze sleutel én een databasedump bezit, kan alle plugin-secrets (waaronder het Graph client secret) ontsleutelen. Roteer het client secret in Azure periodiek en behandel de encryptiesleutel met hetzelfde beveiligingsniveau als de secrets zelf.
 
-De properties `tokenBaseUrl` en `graphBaseUrl` zijn bedoeld voor tests en zouden in productie altijd op de standaard Microsoft-endpoints moeten staan; een gewijzigde `tokenBaseUrl` betekent dat het client secret naar een ander endpoint wordt gestuurd. Beperk toegang tot pluginconfiguratiebeheer daarom tot vertrouwde beheerders.
+**Endpoints zijn deployment-instellingen, geen pluginproperties**
+`tokenBaseUrl` en `graphBaseUrl` waren eerder per pluginconfiguratie instelbaar vanuit de beheer-UI. Dat was een exfiltratiepad voor het client secret: dat secret wordt als formulierveld naar `tokenBaseUrl` gePOST, dus wie pluginconfiguraties mocht beheren kon het naar een eigen host laten sturen. `graphBaseUrl` gaf daarnaast een SSRF-primitief, en de hostcontrole op de upload-URL leidde haar verwachte host áf uit `graphBaseUrl` — waardoor die controle precies zo sterk was als de waarde die een beheerder had ingevuld.
+
+Deze instellingen staan nu onder `graph-mail.http` en worden bij het opstarten gevalideerd tegen een vaste allowlist van Microsoft-endpoints (inclusief de sovereign clouds). Een afwijkende waarde laat de applicatie falen bij opstarten met een leesbare melding.
+
+```yaml
+graph-mail:
+  http:
+    token-base-url: https://login.microsoftonline.com   # default
+    graph-base-url: https://graph.microsoft.com         # default
+    connect-timeout-seconds: 10
+    read-timeout-seconds: 30
+    attachment-concurrency: 8                # max gelijktijdige verzendingen mét bijlagen
+    attachment-acquire-timeout-seconds: 30
+    # allow-non-microsoft-endpoints: true    # UITSLUITEND voor tests / lokale sandbox
+```
+
+> **Migratie:** bestaande pluginconfiguraties met een `tokenBaseUrl`- of `graphBaseUrl`-waarde negeren die waarde na deze upgrade. Stond er een niet-standaard endpoint in, zet dat dan om naar `graph-mail.http` in `application.yml`. Hetzelfde geldt voor `connectTimeoutSeconds` en `readTimeoutSeconds`.
+
+**Geheugengebruik bij bijlagen**
+Een verzending met bijlagen houdt de volledige inhoud in het heap-geheugen. Zonder rem zou het aantal gelijktijdige verzendingen gelijk zijn aan de grootte van de job-executor thread-pool, wat bij de hieronder aanbevolen `max-pool-size: 50` neerkomt op meerdere gigabytes en dus een `OutOfMemoryError`. `graph-mail.http.attachment-concurrency` begrenst dit los van de thread-pool; verzendingen zónder bijlagen worden niet begrensd. Wordt binnen `attachment-acquire-timeout-seconds` geen slot vrij, dan faalt de verzending als *transient* en probeert de job-executor het later opnieuw.
+
+**Connection pooling**
+De plugin gebruikt één gedeelde, gepoolde HTTP-client (de JDK `HttpClient`) voor alle verzendingen. Eerder werd per plugin-actie-invocatie een nieuwe `RestTemplate` opgebouwd — Valtimo hydrateert namelijk een nieuwe plugin-instantie per actie — waardoor er per e-mail een volledige TLS-handshake nodig was en verbindingen nooit hergebruikt werden. Er is bewust geen afhankelijkheid van Apache HttpClient5 toegevoegd, zodat de plugin niets hoeft aan te nemen over de HTTP-bibliotheken op het classpath van de omringende GZAC-applicatie.
 
 **Rate limiting test-send**
 Het test-send endpoint staat maximaal 1 verzoek per gebruiker per 10 seconden toe. De teller wordt in geheugen bijgehouden per JVM-instantie. Bij een multi-node deployment geldt de limiet per node afzonderlijk.
