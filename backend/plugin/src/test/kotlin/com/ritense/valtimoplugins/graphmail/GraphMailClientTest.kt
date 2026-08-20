@@ -141,6 +141,24 @@ class GraphMailClientTest {
         wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
     }
 
+    @Test fun `different secret for the same tenant and client does not reuse the cached token`() {
+        // Regression test: the cache key used to be "tenantId:clientId" only, so a plugin
+        // configuration with a wrong or different secret could silently reuse a token that a
+        // different (correct) secret already fetched for the same tenant/client, without Azure
+        // Entra ever validating that secret. The cache key must include the secret.
+        stubToken()
+        client.getAccessToken(GraphCredentials("t", "c", "correct-secret"))
+        client.getAccessToken(GraphCredentials("t", "c", "different-secret"))
+        wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
+    }
+
+    @Test fun `same tenant, client and secret still hits the cache`() {
+        stubToken()
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
+        wireMock.verify(1, postRequestedFor(urlPathMatching(tokenPath)))
+    }
+
     @Test fun `throws on 400 token request`() {
         wireMock.stubFor(post(urlPathMatching(tokenPath)).willReturn(aResponse().withStatus(400)))
         assertThrows(GraphMailException::class.java) { client.getAccessToken(GraphCredentials("t", "c", "s")) }
