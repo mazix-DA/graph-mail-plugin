@@ -28,6 +28,12 @@ jobs:
       - name: Test
         run: ./gradlew :backend:plugin:test
 
+      # ktlint is configured (see build.gradle.kts) but was never actually enforced in CI.
+      # main is currently fully ktlint-clean, so this is a real, blocking gate from day one --
+      # it only needs to stay that way going forward.
+      - name: Ktlint
+        run: ./gradlew :backend:plugin:ktlintCheck
+
   frontend-lint:
     name: Frontend lint
     runs-on: ubuntu-latest
