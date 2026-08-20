@@ -83,7 +83,11 @@ E-mails verzonden via de `send-email` actie worden opgeslagen in de Sent Items v
 Bijlagen van 2 MiB of kleiner worden inline (base64) meegestuurd in de sendMail-aanroep (alleen `Mail.Send` nodig). Als een bijlage — of het totaal aan bijlagen — groter is dan 2 MiB, verstuurt de plugin automatisch via een Graph API upload-sessie (concept → chunked upload → verzenden); dit pad vereist `Mail.ReadWrite`. Bij de upload-sessie is het verzendtijdstip het moment van de definitieve verzendaanroep, niet het moment van conceptaanmaak.
 
 **Dubbele verzending bij transactieretry**
-De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie terugdraait en opnieuw start (bijvoorbeeld bij een optimistic lock conflict), kan de e-mail meer dan één keer worden verzonden. Mitigatie: sla een idempotency-token op als procesvariabele en dedupliceer aan de ontvangerskant.
+De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie na een geslaagde verzending alsnog terugdraait (bijvoorbeeld door een optimistic lock op andere procesdata) en de activiteit opnieuw uitvoert, is de e-mail bij Graph al onomkeerbaar geaccepteerd. De plugin herkent deze herhaling zelf — op basis van execution-id plus activity-id — en slaat de tweede Graph-aanroep over; je hoeft hier in het procesmodel niets voor in te richten.
+
+> **Let op — een procesvariabele werkt hier níet als guard.** Die wordt geschreven binnen dezelfde transactie die terugrolt, dus hij verdwijnt samen met de retry en is voor de volgende poging nooit zichtbaar. Daarom gebruikt de plugin een bewust niet-transactionele, in-geheugen guard.
+
+> **Beperking:** de guard beschermt tegen een retry die dezelfde, nog draaiende JVM-instantie afhandelt — het realistische scenario, waarbij de retry milliseconden tot seconden later plaatsvindt. Hij overleeft géén herstart van de applicatie tussen de oorspronkelijke verzending en een latere retry. Is die garantie in jouw situatie nodig, dan is aanvullende deduplicatie aan de ontvangerskant het aangewezen middel.
 
 **HTML-body sanitisatie**
 De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met http/https/cid-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
@@ -95,10 +99,10 @@ De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toeges
 | Max ontvangers per veld (To / Cc / Bcc) | 100 |
 | Max ontvangers totaal (To + Cc + Bcc) | 200 |
 | Max onderwerpregel | 255 tekens |
-| Max body-grootte | 5 MB |
+| Max body-grootte | 5 MiB |
 | Max bijlagen | 5 |
-| Max grootte per bijlage | 25 MB |
-| Max totale bijlagegrootte | 25 MB |
+| Max grootte per bijlage | 25 MiB |
+| Max totale bijlagegrootte | 25 MiB |
 
 **Secret management**
 Het `clientSecret` is een Valtimo secret property (`@PluginProperty(secret = true)`): het wordt AES-versleuteld opgeslagen in de database en nooit teruggestuurd naar de frontend. De encryptiesleutel komt uit de applicatieproperty `valtimo.plugin.encryption-secret` en moet exact 16, 24 of 32 bytes lang zijn. Zet deze sleutel **nooit** in de repository of in een gecommit configuratiebestand — lever hem aan via een environment variable of een secret store (Azure Key Vault, HashiCorp Vault, Kubernetes Secrets):
@@ -141,6 +145,21 @@ operaton:
 Bij minder dan 20 threads loop je een reëel risico op een vastgelopen job-executor onder normale productielast. De plugin logt een waarschuwing bij opstarten als herinnering.
 
 > **Let op (queue-size):** bij een thread-pool-executor worden threads bóven `core-pool-size` pas aangemaakt wanneer de wachtrij vol is. Staat `queue-size` hoog, dan blijft de pool in de praktijk op `core-pool-size` steken en doet `max-pool-size` niets. Houd `queue-size` daarom klein als je op de extra threads wilt kunnen leunen, en stem het totale aantal threads af op de database-connectiepool (meer werkers betekent meer gelijktijdige verbindingen).
+
+**Geheugengebruik — schaalt mee met het aantal threads**
+
+Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzending loopt; er wordt niet naar schijf gestreamd. De piek per gelijktijdige verzending is daarmee ruwweg:
+
+| Onderdeel | Maximum |
+|-----------|---------|
+| Bijlagen (totaal) | 25 MiB |
+| HTML-body | 5 MiB |
+| Chunk-buffer bij de upload-sessie | 3,2 MiB |
+| **Piek per verzending** | **≈ 33 MiB** |
+
+Dit vermenigvuldigt met het aantal threads dat tegelijk kan verzenden. Met de aanbevolen `max-pool-size: 50` betekent dat in het uiterste geval ruim **1,6 GB heap** die alleen aan e-mails in transit opgaat. Houd hier rekening mee bij het instellen van `-Xmx`, en verhoog `max-pool-size` niet zonder de heap navenant mee te schalen — anders ruil je een vastgelopen job-executor in voor `OutOfMemoryError`.
+
+Verstuur je zelden of nooit grote bijlagen, dan is de praktijkpiek een fractie hiervan: zonder bijlagen blijft het bij de body plus wat overhead.
 
 ## Test-send
 
