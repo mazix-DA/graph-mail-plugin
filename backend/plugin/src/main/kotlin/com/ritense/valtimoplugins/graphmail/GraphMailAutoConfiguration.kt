@@ -39,11 +39,21 @@ class GraphMailAutoConfiguration {
         )
     }
 
+    // Single shared instance — see GraphTokenCache's class doc for why the cache must be a
+    // bean rather than something each GraphMailClientImpl owns: Valtimo hydrates a fresh
+    // GraphMailPlugin (and therefore, previously, a fresh client) per action invocation, so
+    // an instance-owned cache never accumulated hits. Both the plugin action path and the
+    // test-send controller path share this one cache, keyed by tenantId+clientId.
+    @Bean
+    @ConditionalOnMissingBean(GraphTokenCache::class)
+    fun graphTokenCache(): GraphTokenCache = GraphTokenCache()
+
     @Bean
     @ConditionalOnMissingBean(GraphMailClient::class)
     fun graphMailClient(
         restTemplateBuilder: RestTemplateBuilder,
         objectMapper: ObjectMapper,
+        graphTokenCache: GraphTokenCache,
     ): GraphMailClient {
         val restTemplate =
             restTemplateBuilder
@@ -52,7 +62,7 @@ class GraphMailAutoConfiguration {
                 .build()
                 .also { configureJackson(it, objectMapper) }
 
-        return GraphMailClientImpl(RestClient.create(restTemplate))
+        return GraphMailClientImpl(RestClient.create(restTemplate), tokenCache = graphTokenCache)
     }
 
     @Bean
@@ -63,6 +73,7 @@ class GraphMailAutoConfiguration {
         objectMapper: ObjectMapper,
         resourceStorageService: TemporaryResourceStorageService,
         eventPublisher: ApplicationEventPublisher,
+        graphTokenCache: GraphTokenCache,
     ): GraphMailPluginFactory =
         GraphMailPluginFactory(
             pluginService,
@@ -70,6 +81,7 @@ class GraphMailAutoConfiguration {
             objectMapper,
             resourceStorageService,
             eventPublisher,
+            graphTokenCache,
         )
 
     @Bean
