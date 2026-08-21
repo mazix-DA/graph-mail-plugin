@@ -76,6 +76,26 @@ class AllowedSendersChangeGuardTest {
         verify(jp).proceed()
     }
 
+    @Test fun `a repeated entry is not a change`() {
+        // The frontend normaliser deduplicates for exactly this reason; if it did not, the form
+        // would demand a secret for a list the backend considers untouched.
+        stubStored(storedConfiguration("noreply@test.nl"))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,noreply@test.nl"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
+    }
+
+    @Test fun `trailing and repeated separators are not a change`() {
+        stubStored(storedConfiguration("noreply@test.nl,@test.nl"))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,,@test.nl,"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
+    }
+
     @Test fun `a changed allowlist without the secret is rejected`() {
         stubStored(storedConfiguration("noreply@test.nl"))
         val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,ceo@test.nl"))

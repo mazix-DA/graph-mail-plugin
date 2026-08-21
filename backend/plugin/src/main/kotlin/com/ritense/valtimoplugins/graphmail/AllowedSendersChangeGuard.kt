@@ -8,6 +8,12 @@ import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.slf4j.LoggerFactory
 
+// The one place this expression is written down. The startup check re-evaluates it against the real
+// method signatures and AllowedSendersChangeGuardWeavingTest asserts it still matches, so a Valtimo
+// change that breaks it surfaces as a failure rather than as a quietly inactive guard.
+internal const val UPDATE_PLUGIN_CONFIGURATION_POINTCUT =
+    "execution(* com.ritense.plugin.service.PluginService.updatePluginConfiguration(..))"
+
 internal const val GRAPH_MAIL_PLUGIN_KEY = "entra"
 internal const val ALLOWED_SENDERS_PROPERTY = "allowedSenders"
 internal const val CLIENT_SECRET_PROPERTY = "clientSecret"
@@ -49,7 +55,7 @@ class AllowedSendersChangeGuard(
     // Spring AOP cannot intercept self-invocation, so the 3-argument overload's internal delegation
     // to the 4-argument one passes the proxy by. Matching on name means whichever overload an
     // external caller uses is intercepted exactly once.
-    @Around("execution(* com.ritense.plugin.service.PluginService.updatePluginConfiguration(..))")
+    @Around(UPDATE_PLUGIN_CONFIGURATION_POINTCUT)
     fun requireSecretWhenAllowlistChanges(joinPoint: ProceedingJoinPoint): Any? {
         val configurationId = joinPoint.args.firstOrNull { it is PluginConfigurationId } as? PluginConfigurationId
         val submitted = joinPoint.args.lastOrNull { it is ObjectNode } as? ObjectNode

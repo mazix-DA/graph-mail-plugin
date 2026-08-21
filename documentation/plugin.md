@@ -64,7 +64,7 @@ Blijft de whitelist ongewijzigd, dan verandert er niets: het secretveld mag leeg
 
 Dit wordt server-side afgedwongen (`AllowedSendersChangeGuard`), dus ook een directe `PUT /api/v1/plugin/configuration/{id}` die de frontend omzeilt krijgt een `400`. De controle grijpt in vóórdat Valtimo een leeg secretveld aanvult met de opgeslagen waarde — daarna is niet meer vast te stellen óf het secret is meegegeven.
 
-> **Uitschakelen:** kan met `graph-mail.require-secret-for-allowlist-change: false`. Dat is een reële verzwakking en daarom een expliciete, zichtbare keuze. De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden (bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigde) — een beveiligingscontrole die stilletjes wegvalt is erger dan een die nooit beloofd is.
+> **Uitschakelen:** kan met `graph-mail.require-secret-for-allowlist-change: false`. Dat is een reële verzwakking en daarom een expliciete, zichtbare keuze. De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden (bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigde) — een beveiligingscontrole die stilletjes wegvalt is erger dan een die nooit beloofd is. De opstartcontrole loopt daarvoor de advisor-keten van de daadwerkelijke proxy na en eist dat de pointcut élke `updatePluginConfiguration`-variant raakt; dat de bean een AOP-proxy ís zegt niets, want die is door `@Transactional` sowieso al geproxied.
 
 ## Actie: send-email
 

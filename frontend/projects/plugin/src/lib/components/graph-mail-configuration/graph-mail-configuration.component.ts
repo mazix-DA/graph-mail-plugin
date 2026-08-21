@@ -214,11 +214,18 @@ export class GraphMailPluginConfigurationComponent
   // in AllowedSendersChangeGuard, so the two cannot disagree about what counts as "changed".
   // Reordering or respacing the same addresses is not a change.
   private allowlistChanged(current: string | undefined): boolean {
+    // Deduplicated, because the backend compares as a Set. Without this the two disagree about
+    // "noreply@x.nl" versus "noreply@x.nl,noreply@x.nl": the form would demand the secret for what
+    // the backend considers an unchanged list.
     const normalise = (value: string | null | undefined): string =>
-      (value ?? '')
-        .split(',')
-        .map(entry => entry.trim().toLowerCase())
-        .filter(entry => !!entry)
+      Array.from(
+        new Set(
+          (value ?? '')
+            .split(',')
+            .map(entry => entry.trim().toLowerCase())
+            .filter(entry => !!entry),
+        ),
+      )
         .sort()
         .join(',');
 
