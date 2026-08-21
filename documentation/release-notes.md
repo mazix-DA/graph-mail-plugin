@@ -4,15 +4,19 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
 ## 1.0.5
 
-Vervolg op een diepgaande review van de plugin. Bevat twee correctheidsfixes met direct effect op
-verzonden e-mail, een security-hardening met een migratiestap, en de eerste echte
-performance-ingreep.
+Vervolg op een diepgaande review van de plugin, aangevuld met de bevindingen van een
+geautomatiseerde review-ronde daarop. Bevat verscheidene correctheidsfixes met direct effect op
+verzonden e-mail, meerdere security-hardenings (waaronder één met een migratiestap), en de eerste
+echte performance-ingreep.
 
 **Breaking — pluginproperties verplaatst naar applicatieconfiguratie**
 `tokenBaseUrl`, `graphBaseUrl`, `connectTimeoutSeconds` en `readTimeoutSeconds` zijn geen
 `@PluginProperty` meer en staan nu onder `graph-mail.http` in `application.yml`. Bestaande
 pluginconfiguraties met afwijkende waarden negeren die na deze upgrade — zet ze om naar de
 applicatieconfiguratie. Zie `documentation/plugin.md` voor het volledige blok.
+
+Let op: een afwijkend endpoint kan niet ongewijzigd mee — `graph-mail.http` accepteert alleen
+endpoints uit een vaste Microsoft-allowlist en laat de applicatie anders falen bij opstarten.
 
 Reden: het client secret wordt als formulierveld naar `tokenBaseUrl` gePOST. Zolang die property
 vanuit de beheer-UI instelbaar was, kon iedereen die pluginconfiguraties mocht beheren het secret
@@ -37,8 +41,19 @@ worden nu bij opstarten gevalideerd tegen een vaste allowlist van Microsoft-endp
 - Opruimen van een concept gebeurt niet meer ná de verzendaanroep. Een geslaagde verzending die op
   het antwoord time-oute liet de opruimactie het bericht uit Verzonden items verwijderen.
 - 429 tijdens een chunk-upload wordt nu geretryd in plaats van de hele upload en het concept weg te
-  gooien; de upload volgt daarbij `nextExpectedRanges` van de server in plaats van blind door te
-  tellen op de eigen offset.
+  gooien. De upload volgt daarbij `nextExpectedRanges` van de server — ook wanneer die naar een
+  eerdere positie wijst, want dat betekent dat Graph de zojuist verstuurde bytes níet heeft
+  vastgelegd en lokaal doortellen een gat in de bijlage achterlaat. Een server die herhaaldelijk
+  niet vooruit wil, of een offset buiten het bestand rapporteert, breekt de upload af als
+  *transient* in plaats van een corrupte bijlage te versturen.
+- De client-credentials scope volgt nu het geconfigureerde Graph-endpoint. De vaste commerciële
+  scope zou elke verzending in een sovereign cloud (US Gov, China) al bij het ophalen van het token
+  laten falen, terwijl de endpoint-allowlist die clouds wél accepteert.
+- Een 429 of 408 van het token-endpoint wordt geretryd in plaats van gemeld als "controleer Client
+  ID en Secret" — throttling van Entra is geen credentialprobleem.
+- Een verbindingsfout die aantoonbaar vóór verzending optreedt (DNS, connect, TLS-handshake) geldt
+  als *transient* in plaats van als onzekere uitkomst: er is niets verstuurd, dus niets te
+  dupliceren.
 - De token-fetch respecteert nu de deadline van de verzending. De "harde" wandkloklimiet van 30s
   kon eerder met tientallen seconden overschreden worden door de eigen retry-loop van de
   token-aanvraag.
@@ -51,16 +66,27 @@ worden nu bij opstarten gevalideerd tegen een vaste allowlist van Microsoft-endp
   auth-interceptor van de frontend de beheerder uitloggen bij niets meer dan een verkeerd getypt
   client secret. Het wordt nu een 502; de Graph-status blijft in de response body staan.
 - Ruwe exception-teksten uit het test-send endpoint worden gemaskeerd op e-mailadressen, net als op
-  het plugin-actiepad al gebeurde.
+  het plugin-actiepad al gebeurde — zowel in de response als in de logregel. Een
+  `RestClientException` bevat de request-URI, en daar staat de afzendermailbox in het pad.
+- De inline-`style`-filter weert ook CSS-escapes en -commentaar (`\75 rl(...)`, `u/**/rl(...)`), en
+  verwijdert bij een treffer het hele `style`-attribuut in plaats van losse declaraties: splitsen op
+  `;` is zelf omzeilbaar.
 
 **Performance**
+- De gedeelde HTTP-client staat expliciet op HTTP/1.1. De JDK-client kiest standaard HTTP/2, waardoor
+  deze refactor als bijeffect ook van protocol zou wisselen — daarvóór sprak de plugin HTTP/1.1.
+  Verbindingshergebruik, het hele doel hier, komt van keep-alive en werkt op 1.1 net zo goed, terwijl
+  HTTP/2 een variabele toevoegt die egress-proxy's in overheidsnetwerken niet altijd goed afhandelen.
 - Eén gedeelde, gepoolde HTTP-client voor alle verzendingen. Valtimo hydrateert een nieuwe
   plugin-instantie per actie, waardoor er per e-mail een complete nieuwe `RestTemplate` met eigen
   connection manager werd opgebouwd: één volledige TLS-handshake per bericht en nul hergebruik van
   verbindingen.
 - `graph-mail.http.attachment-concurrency` begrenst het aantal gelijktijdige verzendingen mét
   bijlagen. Dat aantal was eerder gelijk aan de grootte van de job-executor thread-pool; bij de door
-  de plugin zelf geadviseerde `max-pool-size: 50` is dat een `OutOfMemoryError`.
+  de plugin zelf geadviseerde `max-pool-size: 50` is dat een `OutOfMemoryError`. Het slot wordt
+  aangevraagd vóórdat de bijlagen worden ingelezen — anders zou elke thread eerst zijn volledige
+  payload alloceren en pas daarna in de wachtrij gaan staan, en begrenst de limiet niets dat
+  geheugen kost.
 
 **Diagnostiek**
 - Elke mislukte verzending logt een `verdict` (`PERMANENT_INPUT`, `PERMANENT_REMOTE`, `UNKNOWN`,

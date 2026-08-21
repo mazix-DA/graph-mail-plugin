@@ -39,9 +39,11 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
-import org.springframework.web.client.RestTemplate
+import java.net.http.HttpClient
+import java.time.Duration
 
 class GraphMailClientTest {
 
@@ -90,13 +92,27 @@ class GraphMailClientTest {
         wireMock.start()
 
         val mapper = ObjectMapper().registerKotlinModule()
-        val rest = RestTemplate().apply {
-            messageConverters.removeIf { it is MappingJackson2HttpMessageConverter }
-            messageConverters.add(0, MappingJackson2HttpMessageConverter(mapper))
-        }
 
         client = GraphMailClientImpl(
-            restClient = RestClient.create(rest),
+            // Built the same way GraphMailAutoConfiguration.graphMailRestClient builds it. The
+            // transport-failure tests assert on which exception a connection reset produces, and
+            // that is a property of the request factory — testing a plain RestTemplate would prove
+            // nothing about the client that actually ships.
+            restClient = RestClient.builder()
+                .requestFactory(
+                    JdkClientHttpRequestFactory(
+                        HttpClient.newBuilder()
+                            .connectTimeout(Duration.ofSeconds(10))
+                            .followRedirects(HttpClient.Redirect.NEVER)
+                            .version(HttpClient.Version.HTTP_1_1)
+                            .build()
+                    ).apply { setReadTimeout(Duration.ofSeconds(30)) }
+                )
+                .messageConverters { converters ->
+                    converters.removeIf { it is MappingJackson2HttpMessageConverter }
+                    converters.add(0, MappingJackson2HttpMessageConverter(mapper))
+                }
+                .build(),
             tokenBaseUrl = wireMock.baseUrl(),
             graphBaseUrl = wireMock.baseUrl(),
             // WireMock is not a Microsoft host, so the strict upload-host check is relaxed here —
@@ -118,6 +134,20 @@ class GraphMailClientTest {
     }
 
     // ── Token ──────────────────────────────────────────────────────────────
+
+    @Test fun `the client-credentials scope follows the configured Graph endpoint`() {
+        // A hard-coded commercial scope would make every send fail at the token step for the
+        // sovereign clouds the endpoint allowlist accepts.
+        wireMock.stubFor(post(urlPathMatching(tokenPath))
+            .withRequestBody(containing("scope=" + java.net.URLEncoder.encode(
+                "${wireMock.baseUrl()}/.default", "UTF-8")))
+            .willReturn(okJson(tokenJson())))
+
+        client.getAccessToken(GraphCredentials("t", "c", "s"))
+
+        wireMock.verify(1, postRequestedFor(urlPathMatching(tokenPath)))
+    }
+
 
     @Test fun `fetches token`() {
         stubToken()
@@ -784,7 +814,7 @@ class GraphMailClientTest {
         // upload session carries no bearer token precisely because the URL itself is the capability.
         stubUploadSession("https://attacker.example/steal")
 
-        assertThrows(IllegalArgumentException::class.java) { sendLarge() }
+        assertThrows(GraphMailPermanentException::class.java) { sendLarge() }
 
         wireMock.verify(0, putRequestedFor(urlPathMatching(".*/steal")))
     }
@@ -872,6 +902,99 @@ class GraphMailClientTest {
 
         wireMock.verify(postRequestedFor(urlPathMatching(mailPath))
             .withHeader("Authorization", equalTo("Bearer fresh-token")))
+    }
+
+    @Test fun `a transport failure message does not leak the sender mailbox`() {
+        // RestClientException embeds the request URI, and the mailbox sits in that path
+        // (/v1.0/users/{mailbox}/sendMail) — so a bare ex.message puts a real address into the
+        // logs and, via the test-send endpoint, in front of an administrator.
+        stubToken()
+        wireMock.stubFor(post(urlPathMatching(mailPath))
+            .willReturn(aResponse().withFault(Fault.CONNECTION_RESET_BY_PEER)))
+
+        val ex = assertThrows(GraphMailException::class.java) { sendBasic() }
+
+        assertFalse(
+            ex.message!!.contains(mailbox),
+            "sender mailbox leaked into the exception message: ${ex.message}",
+        )
+    }
+
+    @Test fun `a connection that never reaches Graph is retryable, not unknown`() {
+        // DNS/connect/TLS failures happen before anything is submitted, so nothing can have been
+        // delivered — calling that UNKNOWN would send an operator hunting a message that was never
+        // sent, and would block a retry that is provably safe.
+        stubToken()
+        val unreachable = GraphMailClientImpl(
+            restClient = RestClient.builder()
+                .requestFactory(
+                    JdkClientHttpRequestFactory(
+                        HttpClient.newBuilder()
+                            .connectTimeout(Duration.ofSeconds(2))
+                            .version(HttpClient.Version.HTTP_1_1)
+                            .build()
+                    ).apply { setReadTimeout(Duration.ofSeconds(2)) }
+                )
+                .build(),
+            tokenBaseUrl = wireMock.baseUrl(),
+            // A host that cannot resolve — the failure lands in the connect phase.
+            graphBaseUrl = "http://graph-mail-plugin.invalid",
+            requireMicrosoftUploadHost = false,
+        )
+
+        val ex = assertThrows(GraphMailException::class.java) {
+            unreachable.sendMail(
+                credentials(),
+                OutboundMail(
+                    senderMailbox = mailbox,
+                    toRecipients = recipients("jan@test.nl"),
+                    subject = "Test",
+                    bodyHtml = "<p>Test</p>",
+                ),
+            )
+        }
+
+        assertTrue(
+            ex is GraphMailRetryableException,
+            "a never-submitted request must be retryable, got ${ex::class.simpleName}: ${ex.message}",
+        )
+    }
+
+    @Test fun `a 429 from the token endpoint is retried instead of blamed on the credentials`() {
+        wireMock.stubFor(post(urlPathMatching(tokenPath)).inScenario("token-429")
+            .whenScenarioStateIs("Started")
+            .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0"))
+            .willSetStateTo("ok"))
+        wireMock.stubFor(post(urlPathMatching(tokenPath)).inScenario("token-429")
+            .whenScenarioStateIs("ok")
+            .willReturn(okJson(tokenJson())))
+
+        assertEquals(token, client.getAccessToken(GraphCredentials("t", "c", "s")))
+
+        wireMock.verify(2, postRequestedFor(urlPathMatching(tokenPath)))
+    }
+
+    @Test fun `a persistent 429 from the token endpoint is reported as retryable`() {
+        wireMock.stubFor(post(urlPathMatching(tokenPath))
+            .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")))
+
+        val ex = assertThrows(GraphMailException::class.java) {
+            client.getAccessToken(GraphCredentials("t", "c", "s"))
+        }
+
+        assertTrue(ex is GraphMailRetryableException, "expected retryable, got ${ex::class.simpleName}")
+    }
+
+    @Test fun `a rejected upload URL is permanent, not an input error`() {
+        // IllegalArgumentException here would be classified as PERMANENT_INPUT and tell the
+        // administrator to fix the process data, when the cause is a Graph response.
+        stubToken()
+        stubDraftCreate()
+        stubUploadSession("https://attacker.example/steal")
+
+        val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        assertTrue(ex is GraphMailPermanentException, "expected permanent, got ${ex::class.simpleName}")
     }
 
     // ── Error classification ─────────────────────────────────────────────────

@@ -385,6 +385,47 @@ class GraphMailPluginTest {
         assertThrows<IllegalArgumentException> { send(attachments = VALID_UUID) }
     }
 
+    @Test fun `no attachment bytes are read when no send slot is available`() {
+        // The whole point of the cap is peak heap. Resolving attachments first and only then
+        // queueing for a permit would have every thread allocate its full payload before waiting,
+        // so the limit would bound concurrency without bounding memory — the thing it exists for.
+        val limiter = AttachmentConcurrencyLimiter(permits = 1, acquireTimeoutMs = 100)
+        val gatedPlugin = GraphMailPlugin(mailClient, storage, eventPublisher, SendIdempotencyGuard(), limiter)
+            .apply {
+                tenantId = "test-tenant"
+                clientId = "test-client"
+                clientSecret = "test-secret"
+                allowedSenders = "@test.nl"
+            }
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "a.bin", "contentType" to "application/octet-stream"))
+
+        val holding = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val hog = Thread {
+            limiter.withPermit(hasAttachments = true) {
+                holding.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+        }
+        hog.start()
+        assertTrue(holding.await(5, TimeUnit.SECONDS), "permit holder did not start")
+
+        assertThrows<GraphMailRetryableException> {
+            gatedPlugin.sendEmail(
+                execution, "afzender@test.nl", "ontvanger@test.nl", null, null, null,
+                "Test", VALID_CONTENT_UUID, VALID_UUID,
+            )
+        }
+
+        // Never touched the attachment content — no payload was allocated while queueing.
+        verify(storage, times(0)).getResourceContentAsInputStream(VALID_UUID)
+        verify(mailClient, times(0)).sendMail(any(), any())
+
+        release.countDown()
+        hog.join(5_000)
+    }
+
     // ── Error propagation ────────────────────────────────────────────────────────
 
     @Test fun `propagates GraphMailException from mailClient`() {
@@ -482,7 +523,9 @@ class GraphMailPluginTest {
         verify(mailClient).sendMail(any(), captor.capture())
         val body = captor.firstValue.bodyHtml
         assertFalse(body.contains("tracker.example"), "external url() survived sanitisation: $body")
-        assertTrue(body.contains("color:#333"), "legitimate styling was thrown away: $body")
+        // The whole style attribute goes, not just the offending declaration: splitting a value on
+        // ';' to keep the "clean" part means trusting a parse that the evasion has already beaten.
+        assertFalse(body.contains("style="), "the hostile style attribute should be dropped: $body")
     }
 
     @Test fun `an inline style data uri background is stripped`() {
@@ -495,6 +538,40 @@ class GraphMailPluginTest {
         assertFalse(captor.firstValue.bodyHtml.contains("data:image"))
     }
 
+    @Test fun `a hex-escaped url in an inline style is stripped`() {
+        // CSS lets url() be spelled with escapes, so a literal-text filter misses it while the
+        // renderer still fetches the resource.
+        mockBodyHtml("""<div style="color:red;background:\75 rl(https://tracker.example/p.gif)">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertFalse(captor.firstValue.bodyHtml.contains("tracker.example"))
+    }
+
+    @Test fun `a comment-spliced url in an inline style is stripped`() {
+        mockBodyHtml("""<div style="background:u/**/rl(https://tracker.example/p.gif)">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        assertFalse(captor.firstValue.bodyHtml.contains("tracker.example"))
+    }
+
+    @Test fun `a clean inline style is left completely alone`() {
+        mockBodyHtml("""<div style="color:#333;font-weight:bold">Hi</div>""")
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        val body = captor.firstValue.bodyHtml
+        assertTrue(body.contains("color:#333"), "clean styling must survive: $body")
+        assertTrue(body.contains("font-weight:bold"), "clean styling must survive: $body")
+    }
+
     @Test fun `an inline style import is stripped`() {
         mockBodyHtml("""<div style="@import url(https://evil.example/x.css);color:red">Hi</div>""")
         val captor = argumentCaptor<OutboundMail>()
@@ -504,7 +581,7 @@ class GraphMailPluginTest {
         verify(mailClient).sendMail(any(), captor.capture())
         val body = captor.firstValue.bodyHtml
         assertFalse(body.contains("evil.example"))
-        assertTrue(body.contains("color:red"))
+        assertFalse(body.contains("style="), "the hostile style attribute should be dropped: $body")
     }
 
     @Test fun `a second loop iteration over the same activity is not treated as a duplicate`() {

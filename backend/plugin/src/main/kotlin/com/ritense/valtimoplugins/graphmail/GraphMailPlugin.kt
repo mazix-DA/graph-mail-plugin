@@ -40,8 +40,15 @@ private val EMAIL_OUTPUT_SETTINGS = org.jsoup.nodes.Document.OutputSettings().pr
 // through exactly the constructs the <style>-block exclusion exists to prevent: url() fetches an
 // external resource (a tracking pixel, in GDPR terms), @import pulls in a remote stylesheet, and
 // a data: URI in a background sneaks past the deliberate exclusion of data: from img src.
+// Literal spelling is not enough: CSS lets a value be written with hex escapes or with comments
+// spliced into a keyword, so `background:\75 rl(https://tracker/p.gif)` and `background:u/**/rl(...)`
+// both reach a renderer as url() while matching none of the literal patterns. Treat a backslash or
+// a comment opener in a style value as hostile in its own right — neither has any business in the
+// inline styling of a transactional email.
 private val CSS_EXTERNAL_REF_REGEX =
-    Regex("""(url\s*\(|@import|expression\s*\(|javascript\s*:)""", RegexOption.IGNORE_CASE)
+    Regex("""(url\s*\(|@import|expression\s*\(|javascript\s*:|\\|/\*)""", RegexOption.IGNORE_CASE)
+
+private val sanitizerLogger = LoggerFactory.getLogger("com.ritense.valtimoplugins.graphmail.HtmlSanitizer")
 
 private fun sanitizeHtml(html: String): String {
     val cleaned = Jsoup.clean(html, "", EMAIL_HTML_SAFELIST, EMAIL_OUTPUT_SETTINGS)
@@ -50,12 +57,17 @@ private fun sanitizeHtml(html: String): String {
     doc.select("[style]").forEach { element ->
         val style = element.attr("style")
         if (!CSS_EXTERNAL_REF_REGEX.containsMatchIn(style)) return@forEach
-        // Drop only the offending declarations; the rest of the inline styling is what makes
-        // transactional email render at all, so throwing the whole attribute away is too blunt.
-        val kept = style.split(';')
-            .filter { it.isNotBlank() && !CSS_EXTERNAL_REF_REGEX.containsMatchIn(it) }
-            .joinToString(";")
-        if (kept.isBlank()) element.removeAttr("style") else element.attr("style", kept)
+        // Drop the whole attribute rather than filtering declaration by declaration. Splitting on
+        // ';' is itself defeatable — a ';' can sit inside a string or an escape — so keeping the
+        // "clean" remainder of a value that already contains an evasion attempt means trusting a
+        // parse that has just been shown to be the wrong tool. An email that loses its inline
+        // styling still renders; one that silently fetches a tracking pixel is the failure.
+        sanitizerLogger.debug(
+            "Dropped the inline style on <{}>: it contains an external reference or an obfuscation " +
+                "construct (escape sequence or comment)",
+            element.tagName(),
+        )
+        element.removeAttr("style")
     }
     return doc.body().html()
 }
@@ -241,7 +253,13 @@ class GraphMailPlugin(
                     "Email body became empty after sanitisation — check the HTML content stored at '$contentId'"
                 }
 
-                val attachments = resolveAttachments(parseStringListParam(attachmentIds).ifEmpty { null })
+                // Whether attachments are involved is known from the ID list alone, without
+                // reading a single byte — which matters, because the permit has to be held BEFORE
+                // resolveAttachments() runs. Resolving first and then acquiring would let every
+                // job-executor thread allocate its full attachment payload up front and only then
+                // queue, so peak heap would still scale with the thread pool and the cap would
+                // bound nothing that costs memory.
+                val attachmentIdList = parseStringListParam(attachmentIds)
 
                 logger.debug(
                     "Preparing email — to: {} addresses, from: '{}', subject length: {}",
@@ -251,10 +269,12 @@ class GraphMailPlugin(
                 )
 
                 val auditStart = System.currentTimeMillis()
+                var attachments: List<ResolvedAttachment> = emptyList()
                 try {
                     // Only attachment-carrying sends queue for a slot; plain sends are unbounded
                     // because their memory footprint is negligible.
-                    attachmentConcurrencyLimiter.withPermit(attachments.isNotEmpty()) {
+                    attachmentConcurrencyLimiter.withPermit(attachmentIdList.isNotEmpty()) {
+                        attachments = resolveAttachments(attachmentIdList.ifEmpty { null })
                         client.sendMail(
                             credentials =
                                 GraphCredentials(
@@ -342,6 +362,13 @@ class GraphMailPlugin(
     private fun retryVerdictOf(ex: Throwable): String = when (ex) {
         is IllegalArgumentException, is IllegalStateException ->
             "PERMANENT_INPUT — retrying will fail identically; correct the process data or the plugin configuration"
+        // Before GraphMailPermanentException: this one is thrown for a 401 that survived a forced
+        // token refresh, which is the single most common "grant the permission" case there is, and
+        // it does not extend GraphMailPermanentException — so without its own branch it fell all
+        // the way through to UNCLASSIFIED.
+        is GraphMailTokenExpiredException ->
+            "PERMANENT_REMOTE — the token was rejected even after a refresh; grant Mail.Send as an " +
+                "application permission and give it admin consent"
         is GraphMailPermanentException ->
             "PERMANENT_REMOTE — Graph rejected this permanently; a configuration or permission change is required"
         is GraphMailUnknownOutcomeException ->

@@ -17,7 +17,6 @@ import java.time.format.DateTimeFormatter
 import java.util.Base64
 import kotlin.random.Random
 
-private const val GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 private const val TOKEN_EXPIRY_BUFFER_SECONDS = 60L
 private const val MAX_RETRIES = 5
 private const val INITIAL_BACKOFF_MS = 500L
@@ -36,6 +35,9 @@ private const val CHUNK_MAX_RETRIES = 3
 // How many consecutive server responses may decline to advance the upload before giving up.
 // Graph is allowed to ask us to go back and re-send a range; it is not allowed to do so forever.
 private const val MAX_UPLOAD_STALLS = 3
+
+// Bound the cause-chain walk; a self-referential chain would otherwise hang the classifier.
+private const val MAX_CAUSE_DEPTH = 10
 
 // 4xx statuses that no amount of retrying will change: they need a configuration, permission or
 // input fix first. Everything else in the 4xx range is treated as possibly transient so the job
@@ -79,6 +81,13 @@ class GraphMailClientImpl(
 ) : GraphMailClient {
 
     private val logger = LoggerFactory.getLogger(GraphMailClientImpl::class.java)
+
+    // The client-credentials scope has to name the cloud instance the token will be used against.
+    // Hard-coding the commercial "https://graph.microsoft.com/.default" meant a US Gov or China
+    // tenant — both of which the endpoint allowlist accepts — would ask Entra for a resource that
+    // does not exist in its cloud and fail every send at the token step. Derive it from the Graph
+    // endpoint actually in use instead.
+    private val graphScope: String = "${graphBaseUrl.trimEnd('/')}/.default"
 
     // A hash of clientSecret is part of the cache key — not just tenantId+clientId — so a
     // plugin configuration with a wrong or stale secret can never ride on a token that a
@@ -152,7 +161,7 @@ class GraphMailClientImpl(
             add("grant_type", "client_credentials")
             add("client_id", clientId)
             add("client_secret", clientSecret)
-            add("scope", GRAPH_SCOPE)
+            add("scope", graphScope)
         }
 
         val response = postTokenWithRetry(url, form, tenantId, deadline)
@@ -201,6 +210,30 @@ class GraphMailClientImpl(
                     .body(TokenResponse::class.java)
                     ?: throw GraphMailException("Empty response when fetching access token")
             } catch (ex: HttpClientErrorException) {
+                // Entra throttles (429) and times out (408) like any other service. Treating those
+                // as "check your Client ID and Secret" sends an administrator hunting a credential
+                // problem that does not exist, and burns the send on a condition that clears itself.
+                val status = ex.statusCode.value()
+                if (status == 429 || status == 408) {
+                    if (attempt >= TOKEN_MAX_RETRIES) {
+                        throw GraphMailRetryableException(
+                            "Azure Entra throttled the token request ($status) after $attempt attempts",
+                            ex,
+                            statusCode = status,
+                        )
+                    }
+                    val wait = boundedByDeadline(
+                        parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
+                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000,
+                        deadline,
+                    )
+                    logger.warn(
+                        "Token request {} for tenant [{}] — attempt {}/{}, waiting {}ms",
+                        status, tenantId, attempt, TOKEN_MAX_RETRIES, wait,
+                    )
+                    if (wait > 0) Thread.sleep(wait)
+                    continue
+                }
                 logger.error("Token request rejected ({}) for tenant [{}]", ex.statusCode, tenantId)
                 // Do NOT log ex.responseBodyAsString — Azure token responses may echo back the
                 // client_secret. The HTTP status (logged above) is sufficient for diagnosis.
@@ -228,15 +261,16 @@ class GraphMailClientImpl(
             } catch (ex: RestClientException) {
                 if (attempt >= TOKEN_MAX_RETRIES) {
                     logger.warn("Token request timed out for tenant [{}] after {} attempts: {}",
-                        tenantId, attempt, ex.message)
+                        tenantId, attempt, maskEmailsInText(ex.message))
                     throw GraphMailRetryableException(
-                        "Could not reach Azure Entra (timeout or network error) after $attempt attempts: ${ex.message}",
+                        "Could not reach Azure Entra (timeout or network error) after $attempt attempts: " +
+                            "${maskEmailsInText(ex.message)}",
                         ex,
                     )
                 }
                 val delay = boundedByDeadline(jitteredBackoff(backoffMs, divisor = 2), deadline)
                 logger.warn("Token request network error — attempt {}/{}, retrying in {}ms: {}",
-                    attempt, TOKEN_MAX_RETRIES, delay, ex.message)
+                    attempt, TOKEN_MAX_RETRIES, delay, maskEmailsInText(ex.message))
                 if (delay > 0) Thread.sleep(delay)
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             }
@@ -392,17 +426,36 @@ class GraphMailClientImpl(
                 if (delay > 0) Thread.sleep(delay)
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             } catch (ex: RestClientException) {
+                if (!retryOnTransportError && neverLeftTheClient(ex)) {
+                    // DNS resolution, connect and TLS handshake all fail *before* any request body
+                    // reaches Graph, so there is nothing to duplicate and the outcome is not
+                    // unknown at all. Reporting these as UNKNOWN would send an operator to check a
+                    // mailbox for a message that was provably never submitted, and would block a
+                    // retry that is completely safe.
+                    logger.warn(
+                        "Could not connect to Graph during {} — the request was never submitted, " +
+                            "so this is safe to retry: {}",
+                        actionLabel,
+                        maskEmailsInText(ex.message),
+                    )
+                    throw GraphMailRetryableException(
+                        "Could not connect to Graph during $actionLabel — the request was never " +
+                            "submitted: ${maskEmailsInText(ex.message)}",
+                        ex,
+                    )
+                }
                 if (!retryOnTransportError) {
                     logger.error(
                         "Transport failure during {} — NOT retried: the request may already have been " +
                             "accepted by Graph, and a blind retry would deliver a duplicate message. " +
                             "Verify the mailbox before re-running this activity. Cause: {}",
                         actionLabel,
-                        ex.message,
+                        maskEmailsInText(ex.message),
                     )
                     throw GraphMailUnknownOutcomeException(
                         "Transport failure during $actionLabel — delivery outcome is UNKNOWN and was " +
-                            "deliberately not retried to avoid sending a duplicate: ${ex.message}",
+                            "deliberately not retried to avoid sending a duplicate: " +
+                            "${maskEmailsInText(ex.message)}",
                         ex,
                     )
                 }
@@ -411,10 +464,11 @@ class GraphMailClientImpl(
                         "Graph API unreachable during {} after {} attempts: {}",
                         actionLabel,
                         MAX_RETRIES,
-                        ex.message,
+                        maskEmailsInText(ex.message),
                     )
                     throw GraphMailRetryableException(
-                        "Graph API unreachable during $actionLabel after $MAX_RETRIES attempts: ${ex.message}",
+                        "Graph API unreachable during $actionLabel after $MAX_RETRIES attempts: " +
+                            "${maskEmailsInText(ex.message)}",
                         ex,
                     )
                 }
@@ -446,6 +500,17 @@ class GraphMailClientImpl(
         422 -> "Graph could not process the message content — check the sanitised HTML body."
         else -> "Check the mailbox and $permissionHint."
     }
+
+    // True when the failure happened before anything could have been submitted to Graph: name
+    // resolution, TCP connect, or the TLS handshake. Anything later (a reset or timeout while the
+    // response was awaited) leaves the outcome genuinely unknown.
+    private fun neverLeftTheClient(ex: Throwable): Boolean =
+        generateSequence(ex) { it.cause }.take(MAX_CAUSE_DEPTH).any {
+            it is java.net.UnknownHostException ||
+                it is java.net.ConnectException ||
+                it is javax.net.ssl.SSLHandshakeException ||
+                it is java.net.NoRouteToHostException
+        }
 
     // Retry-After can be seconds ("120") or an HTTP date ("Wed, 21 Oct 2025 07:28:00 GMT").
     private fun parseRetryAfter(header: String?): Long {
@@ -555,7 +620,7 @@ class GraphMailClientImpl(
                 .toBodilessEntity()
             logger.debug("Orphaned draft deleted id={}", draftId)
         } catch (ex: Exception) {
-            logger.warn("Failed to delete orphaned draft id={}: {}", draftId, ex.message)
+            logger.warn("Failed to delete orphaned draft id={}: {}", draftId, maskEmailsInText(ex.message))
         }
     }
 
@@ -657,9 +722,17 @@ class GraphMailClientImpl(
             val expected = runCatching { java.net.URI.create(graphBaseUrl) }.getOrNull()
             uri?.scheme == expected?.scheme && host != null && host == expected?.host
         }
+        // Typed rather than require(): an IllegalArgumentException would be classified as
+        // PERMANENT_INPUT and tell the administrator to correct the process data, when the actual
+        // cause is an unexpected host in a Graph response.
+        //
         // The rejected host is deliberately kept out of the message: it comes from an external
         // response and this string ends up in logs and, indirectly, in operator-facing errors.
-        require(valid) { "Upload URL returned by the Graph API failed host validation" }
+        if (!valid) {
+            throw GraphMailPermanentException(
+                "Upload URL returned by the Graph API failed host validation",
+            )
+        }
     }
 
     private fun uploadInChunks(uploadUrl: String, attachment: ResolvedAttachment, deadline: Long) {

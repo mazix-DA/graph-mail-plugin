@@ -11,8 +11,9 @@ open class GraphMailException(
  * not spend its retry budget on it. Something has to change first — a plugin property, an Azure
  * permission, the mailbox, or the input data.
  *
- * [GraphMailPlugin] translates this into a BPMN error so the process model can route it, instead of
- * letting it become an incident after N identical stack traces.
+ * [GraphMailPlugin] records this as a PERMANENT_REMOTE verdict in the audit log and rethrows it. It
+ * is deliberately NOT converted into a BpmnError — see the comment on GraphMailPlugin.retryVerdictOf
+ * for why that would make things worse for existing process models.
  */
 class GraphMailPermanentException(
     message: String,

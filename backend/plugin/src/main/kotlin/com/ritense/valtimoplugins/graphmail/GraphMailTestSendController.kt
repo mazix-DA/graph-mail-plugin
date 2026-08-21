@@ -204,7 +204,15 @@ class GraphMailTestSendController(
                 // because its message goes straight into the admin UI.
                 else -> "Fout $statusCode: ${maskEmailsInText(ex.message) ?: "Onbekende fout"}"
             }
-            logger.warn("Test send failed — status: {}", statusCode, ex)
+            // Deliberately not passing `ex` itself: its message (and the URIs inside it) can carry
+            // the sender mailbox, and a logged throwable prints that message alongside the stack
+            // trace — undoing the masking applied to the response a few lines above.
+            logger.warn(
+                "Test send failed — status: {}, type: {}, cause: {}",
+                statusCode,
+                ex.javaClass.simpleName,
+                maskEmailsInText(ex.message),
+            )
             ResponseEntity.status(httpStatus)
                 .body(GraphMailTestSendResponse(false, message, statusCode))
         }

@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.context.annotation.Bean
@@ -54,6 +55,7 @@ class GraphMailAutoConfiguration {
     // SimpleClientHttpRequestFactory when no third-party client is present — and, built per plugin
     // instance as it was before, there was nothing to pool in the first place.
     @Bean
+    @Qualifier("graphMailRestClient")
     @ConditionalOnMissingBean(name = ["graphMailRestClient"])
     fun graphMailRestClient(
         objectMapper: ObjectMapper,
@@ -62,6 +64,13 @@ class GraphMailAutoConfiguration {
         val httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
             .followRedirects(HttpClient.Redirect.NEVER)
+            // Pinned to HTTP/1.1 deliberately. The JDK client defaults to HTTP/2, which would make
+            // this refactor change the wire protocol as a side effect of adding pooling — the
+            // previous RestTemplate spoke HTTP/1.1. Connection reuse, the entire point here, comes
+            // from keep-alive and works exactly the same on 1.1, while HTTP/2 adds a variable that
+            // egress proxies and middleboxes in government networks do not always handle. Revisit
+            // as a deliberate, separately tested change rather than as a silent one.
+            .version(HttpClient.Version.HTTP_1_1)
             .build()
 
         val requestFactory = JdkClientHttpRequestFactory(httpClient).apply {
@@ -105,7 +114,11 @@ class GraphMailAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(GraphMailClient::class)
     fun graphMailClient(
-        graphMailRestClient: RestClient,
+        // Qualified rather than resolved by type or parameter name: this plugin runs inside a host
+        // application that may well define its own RestClient, and a @Primary one there would
+        // otherwise be injected here — silently sending Graph traffic through a client with
+        // different timeouts, redirect handling and converters.
+        @Qualifier("graphMailRestClient") graphMailRestClient: RestClient,
         graphTokenCache: GraphTokenCache,
         properties: GraphMailHttpProperties,
     ): GraphMailClient =

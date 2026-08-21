@@ -102,7 +102,7 @@ Elke mislukte verzending logt een `verdict`-veld dat aangeeft wat de beheerder m
 | `PERMANENT_INPUT` | Invoer- of configuratiefout; opnieuw proberen faalt identiek. Corrigeer de procesdata of de pluginconfiguratie. |
 | `PERMANENT_REMOTE` | Graph weigert dit permanent (bijv. 403 zonder `Mail.Send`, 404 onbekende mailbox). Vereist een configuratie- of permissiewijziging. |
 | `UNKNOWN` | Transportfout na verzending; de mail is mogelijk wél verstuurd. Verifieer voordat je opnieuw uitvoert. |
-| `TRANSIENT` | Tijdelijk (429/5xx/netwerk); de job-executor probeert het opnieuw. |
+| `TRANSIENT` | Tijdelijk (429/5xx, of een netwerkfout op een herhaalbare stap zoals conceptaanmaak, het aanmaken van een upload-sessie, of een verbinding die nooit tot stand kwam); de job-executor probeert het opnieuw. Een transportfout op `sendMail` of `messages/{id}/send` nádat het verzoek verstuurd is valt hier **niet** onder — die is `UNKNOWN`. |
 
 Deze classificatie zit bewust in de logging en niet in een `BpmnError`: het omzetten van permanente fouten naar een BPMN-fout zou de procesafhandeling van elk bestaand model wijzigen, en een niet-afgevangen `BpmnError` degradeert tot een incident met de melding "no catching boundary event found" — minder bruikbaar dan de fout die de plugin nu gooit. Wil je permanente fouten in het procesmodel afvangen, gebruik dan een `failedJobRetryTimeCycle` in combinatie met een incident-handler.
 
@@ -149,13 +149,13 @@ graph-mail:
     # allow-non-microsoft-endpoints: true    # UITSLUITEND voor tests / lokale sandbox
 ```
 
-> **Migratie:** bestaande pluginconfiguraties met een `tokenBaseUrl`- of `graphBaseUrl`-waarde negeren die waarde na deze upgrade. Stond er een niet-standaard endpoint in, zet dat dan om naar `graph-mail.http` in `application.yml`. Hetzelfde geldt voor `connectTimeoutSeconds` en `readTimeoutSeconds`.
+> **Migratie:** bestaande pluginconfiguraties met een `tokenBaseUrl`- of `graphBaseUrl`-waarde negeren die waarde na deze upgrade. Stond er een niet-standaard endpoint in, dan kun je dat **niet** ongewijzigd overzetten: `graph-mail.http` accepteert alleen endpoints uit de allowlist hierboven, en een afwijkende waarde laat de applicatie falen bij opstarten. Vervang zo'n endpoint door het juiste Microsoft-endpoint voor jouw cloud (`allow-non-microsoft-endpoints` is uitsluitend bedoeld voor tests en een lokale sandbox). `connectTimeoutSeconds` en `readTimeoutSeconds` kunnen wél ongewijzigd mee als `connect-timeout-seconds` en `read-timeout-seconds`.
 
 **Geheugengebruik bij bijlagen**
 Een verzending met bijlagen houdt de volledige inhoud in het heap-geheugen. Zonder rem zou het aantal gelijktijdige verzendingen gelijk zijn aan de grootte van de job-executor thread-pool, wat bij de hieronder aanbevolen `max-pool-size: 50` neerkomt op meerdere gigabytes en dus een `OutOfMemoryError`. `graph-mail.http.attachment-concurrency` begrenst dit los van de thread-pool; verzendingen zónder bijlagen worden niet begrensd. Wordt binnen `attachment-acquire-timeout-seconds` geen slot vrij, dan faalt de verzending als *transient* en probeert de job-executor het later opnieuw.
 
 **Connection pooling**
-De plugin gebruikt één gedeelde, gepoolde HTTP-client (de JDK `HttpClient`) voor alle verzendingen. Eerder werd per plugin-actie-invocatie een nieuwe `RestTemplate` opgebouwd — Valtimo hydrateert namelijk een nieuwe plugin-instantie per actie — waardoor er per e-mail een volledige TLS-handshake nodig was en verbindingen nooit hergebruikt werden. Er is bewust geen afhankelijkheid van Apache HttpClient5 toegevoegd, zodat de plugin niets hoeft aan te nemen over de HTTP-bibliotheken op het classpath van de omringende GZAC-applicatie.
+De plugin gebruikt één gedeelde, gepoolde HTTP-client (de JDK `HttpClient`) voor alle verzendingen. Eerder werd per plugin-actie-invocatie een nieuwe `RestTemplate` opgebouwd — Valtimo hydrateert namelijk een nieuwe plugin-instantie per actie — waardoor er per e-mail een volledige TLS-handshake nodig was en verbindingen nooit hergebruikt werden. Er is bewust geen afhankelijkheid van Apache HttpClient5 toegevoegd, zodat de plugin niets hoeft aan te nemen over de HTTP-bibliotheken op het classpath van de omringende GZAC-applicatie. De client staat expliciet op HTTP/1.1: de JDK-client kiest standaard HTTP/2, en dat zou het wire-protocol wijzigen als bijeffect van een performance-refactor. Verbindingshergebruik komt van keep-alive en werkt op HTTP/1.1 identiek.
 
 **Rate limiting test-send**
 Het test-send endpoint staat maximaal 1 verzoek per gebruiker per 10 seconden toe. De teller wordt in geheugen bijgehouden per JVM-instantie. Bij een multi-node deployment geldt de limiet per node afzonderlijk.
