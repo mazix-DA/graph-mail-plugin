@@ -21,14 +21,33 @@ private const val TOKEN_EXPIRY_BUFFER_SECONDS = 60L
 private const val MAX_RETRIES = 5
 private const val INITIAL_BACKOFF_MS = 500L
 private const val BACKOFF_MULTIPLIER = 2.0
-// Cap the Retry-After header to limit per-sleep blocking time on the job-executor thread.
-// 15s × 5 retries = 75s worst case per send; wall-clock caps (30s/120s) apply on top.
+
+// How long this call may spend *sleeping* before it stops waiting and hands the work back to the
+// job executor.
+//
+// Every sleep here happens on an Operaton job-executor thread, and that pool is shared with every
+// other job in the engine. Graph throttles mail per mailbox and does it hard, so a 429 storm used
+// to put all of those threads to sleep at once for up to 75s each — the engine then processes no
+// jobs at all, of any kind, until they wake. One external API taking down the whole engine is a
+// worse failure than the send being slow.
+//
+// A short budget still absorbs the blips that are genuinely cheaper to wait out than to reschedule
+// (a single 500ms backoff, a one-second Retry-After). Anything longer becomes a
+// GraphMailRetryableException, and the engine reschedules it without holding a thread — which is
+// what a BPM engine's retry mechanism is for. Pair it with a failedJobRetryTimeCycle on the service
+// task; see documentation/plugin.md.
+private const val MAX_IN_CALL_WAIT_MS = 2_000L
+
+// Retry-After values above this are not worth waiting for in-call — hand back to the engine instead.
 private const val MAX_RETRY_AFTER_SECONDS = 15L
 private const val TOKEN_MAX_RETRIES = 3
-// Hard wall-clock cap for the entire send operation (including all retries and backoff sleeps).
-// Ensures a 429 storm cannot hold an Operaton BPM job-executor thread longer than this limit.
+
+// Wall-clock ceiling for one attempt, sleeps included. Still needed as a backstop: a request that
+// hangs just under the read timeout can outlast the wait budget on its own.
 private const val MAX_SEND_WALL_CLOCK_MS = 30_000L
-// Longer deadline for the draft+upload flow — large uploads can take tens of seconds.
+
+// Longer for the draft+upload flow — a large upload legitimately takes tens of seconds of transfer,
+// which is work rather than waiting.
 private const val MAX_DRAFT_SEND_WALL_CLOCK_MS = 120_000L
 private const val CHUNK_MAX_RETRIES = 3
 
@@ -48,11 +67,44 @@ private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 409, 413
 private val MICROSOFT_UPLOAD_HOST_SUFFIXES =
     listOf(".microsoft.com", ".office.com", ".office.net", ".office365.com", ".sharepoint.com")
 
-// NOTE (threading): retry backoff uses Thread.sleep(), which blocks the calling thread.
-// In Operaton BPM (V13), SERVICE_TASK actions run on the job-executor thread pool.
-// Worst case: 429 with Retry-After=15s × 5 attempts = 75s; wall-clock caps enforce the hard limit.
-// Size the job executor thread pool accordingly (operaton.bpm.job-executor.core-pool-size),
-// or replace with a non-blocking HTTP client (WebClient) in a future release.
+// NOTE (threading): retry backoff still uses Thread.sleep(), but only within MAX_IN_CALL_WAIT_MS.
+// Beyond that the operation gives up its thread and returns a retryable failure, so a throttling
+// storm can no longer hold the job-executor pool hostage. Configure a failedJobRetryTimeCycle on
+// the service task so the engine spreads those retries out.
+
+/**
+ * Bounds how long one call may spend asleep before it gives up its thread.
+ *
+ * Sleeping is not free here: it happens on an Operaton job-executor thread that the whole engine
+ * shares. Short waits are still worth it — rescheduling a job costs more than riding out a 500ms
+ * backoff — but once the total passes [MAX_IN_CALL_WAIT_MS] the right move is to stop occupying the
+ * thread and let the engine retry later.
+ *
+ * Not thread-safe, and does not need to be: one instance belongs to one call.
+ */
+private class WaitBudget(
+    private val totalMs: Long = MAX_IN_CALL_WAIT_MS,
+) {
+    private var spentMs = 0L
+
+    /** Sleeps for [requestedMs], or throws if that would exhaust the budget. */
+    fun sleepOrHandBack(
+        requestedMs: Long,
+        what: String,
+    ) {
+        if (requestedMs <= 0) return
+        if (spentMs + requestedMs > totalMs) {
+            throw GraphMailRetryableException(
+                "$what would need ${requestedMs}ms more waiting and this call has already waited " +
+                    "${spentMs}ms of its ${totalMs}ms budget. Handing back to the job executor " +
+                    "rather than holding its thread — configure a failedJobRetryTimeCycle on the " +
+                    "service task so the retry is spread out.",
+            )
+        }
+        spentMs += requestedMs
+        Thread.sleep(requestedMs)
+    }
+}
 
 /**
  * Implementation of [GraphMailClient].
@@ -79,7 +131,6 @@ class GraphMailClientImpl(
     // configuration instead.
     private val requireMicrosoftUploadHost: Boolean = true,
 ) : GraphMailClient {
-
     private val logger = LoggerFactory.getLogger(GraphMailClientImpl::class.java)
 
     // The client-credentials scope has to name the cloud instance the token will be used against.
@@ -95,13 +146,20 @@ class GraphMailClientImpl(
     // Without this, tenantId+clientId (not marked `secret` on the plugin property, so visible
     // in the admin UI) would be enough to obtain a working token via the shared cache without
     // Azure Entra ever validating the caller's actual secret.
-    private fun cachePrefix(tenantId: String, clientId: String) = "$tenantId:$clientId:"
+    private fun cachePrefix(
+        tenantId: String,
+        clientId: String,
+    ) = "$tenantId:$clientId:"
 
-    private fun cacheKey(tenantId: String, clientId: String, clientSecret: String) =
-        "${cachePrefix(tenantId, clientId)}${sha256(clientSecret)}"
+    private fun cacheKey(
+        tenantId: String,
+        clientId: String,
+        clientSecret: String,
+    ) = "${cachePrefix(tenantId, clientId)}${sha256(clientSecret)}"
 
     private fun sha256(value: String): String =
-        MessageDigest.getInstance("SHA-256")
+        MessageDigest
+            .getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
 
@@ -109,16 +167,22 @@ class GraphMailClientImpl(
         cacheKey(credentials.tenantId, credentials.clientId, credentials.clientSecret)
 
     // `deadline` is the send operation's wall-clock budget. Passing it down matters: without it the
-    // token retry loop runs its own unbounded Thread.sleep() cycle *inside* the send loop, and the
+    // token retry loop runs its own wait cycle *inside* the send loop, and the
     // send's "hard" cap silently becomes cap + token-retry time.
-    internal fun getAccessToken(credentials: GraphCredentials, deadline: Long? = null): String {
+    internal fun getAccessToken(
+        credentials: GraphCredentials,
+        deadline: Long? = null,
+    ): String {
         requireCredentials(credentials)
         return tokenCache.getOrFetch(cacheKeyFor(credentials)) { fetchToken(credentials, deadline) }
     }
 
     // Bypasses the cache entirely. Used only by the 401 handler — see the comment at that call site
     // for why re-reading the cache after an invalidation is not enough.
-    private fun forceFreshAccessToken(credentials: GraphCredentials, deadline: Long?): String {
+    private fun forceFreshAccessToken(
+        credentials: GraphCredentials,
+        deadline: Long?,
+    ): String {
         requireCredentials(credentials)
         return tokenCache.forceFetch(cacheKeyFor(credentials)) { fetchToken(credentials, deadline) }
     }
@@ -129,7 +193,10 @@ class GraphMailClientImpl(
         require(credentials.clientSecret.isNotBlank()) { "clientSecret must not be blank" }
     }
 
-    override fun invalidateCache(tenantId: String?, clientId: String?) {
+    override fun invalidateCache(
+        tenantId: String?,
+        clientId: String?,
+    ) {
         when {
             tenantId != null && clientId != null -> {
                 // The secret isn't known here (this is the public invalidate-by-selector API),
@@ -142,27 +209,34 @@ class GraphMailClientImpl(
                 val count = tokenCache.invalidateAll()
                 logger.warn("Token cache fully cleared ({} entries)", count)
             }
-            else -> logger.warn(
-                "invalidateCache called with partial selector — ignored (tenantId={}, clientId={})",
-                tenantId != null, clientId != null
-            )
+            else ->
+                logger.warn(
+                    "invalidateCache called with partial selector — ignored (tenantId={}, clientId={})",
+                    tenantId != null,
+                    clientId != null,
+                )
         }
     }
 
-    private fun fetchToken(credentials: GraphCredentials, deadline: Long? = null): Pair<String, Instant> {
+    private fun fetchToken(
+        credentials: GraphCredentials,
+        deadline: Long? = null,
+    ): Pair<String, Instant> {
         val (tenantId, clientId, clientSecret) = credentials
-        val url = UriComponentsBuilder
-            .fromUriString("$tokenBaseUrl/{tenantId}/oauth2/v2.0/token")
-            .build()
-            .expand(tenantId)
-            .toUriString()
+        val url =
+            UriComponentsBuilder
+                .fromUriString("$tokenBaseUrl/{tenantId}/oauth2/v2.0/token")
+                .build()
+                .expand(tenantId)
+                .toUriString()
 
-        val form = LinkedMultiValueMap<String, String>().apply {
-            add("grant_type", "client_credentials")
-            add("client_id", clientId)
-            add("client_secret", clientSecret)
-            add("scope", graphScope)
-        }
+        val form =
+            LinkedMultiValueMap<String, String>().apply {
+                add("grant_type", "client_credentials")
+                add("client_id", clientId)
+                add("client_secret", clientSecret)
+                add("scope", graphScope)
+            }
 
         val response = postTokenWithRetry(url, form, tenantId, deadline)
 
@@ -178,8 +252,10 @@ class GraphMailClientImpl(
     // Token requests use a wider jitter band (divisor 2) than Graph API calls (divisor 5) —
     // preserved from the pre-existing tuning, not changed by this refactor.
     // Never sleep past the operation's deadline; a null deadline means "no budget attached".
-    private fun boundedByDeadline(delayMs: Long, deadline: Long?): Long =
-        if (deadline == null) delayMs else delayMs.coerceAtMost(deadline - System.currentTimeMillis())
+    private fun boundedByDeadline(
+        delayMs: Long,
+        deadline: Long?,
+    ): Long = if (deadline == null) delayMs else delayMs.coerceAtMost(deadline - System.currentTimeMillis())
 
     private fun jitteredBackoff(
         backoffMs: Long,
@@ -194,15 +270,17 @@ class GraphMailClientImpl(
     ): TokenResponse {
         var attempt = 0
         var backoffMs = INITIAL_BACKOFF_MS
+        val waitBudget = WaitBudget()
         while (true) {
             if (deadline != null && System.currentTimeMillis() > deadline) {
                 throw GraphMailRetryableException(
-                    "Timed out acquiring an access token for tenant [$tenantId] before the send deadline"
+                    "Timed out acquiring an access token for tenant [$tenantId] before the send deadline",
                 )
             }
             attempt++
             try {
-                return restClient.post()
+                return restClient
+                    .post()
                     .uri(url)
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .body(form)
@@ -222,16 +300,21 @@ class GraphMailClientImpl(
                             statusCode = status,
                         )
                     }
-                    val wait = boundedByDeadline(
-                        parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
-                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000,
-                        deadline,
-                    )
+                    val wait =
+                        boundedByDeadline(
+                            parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
+                                .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000,
+                            deadline,
+                        )
                     logger.warn(
                         "Token request {} for tenant [{}] — attempt {}/{}, waiting {}ms",
-                        status, tenantId, attempt, TOKEN_MAX_RETRIES, wait,
+                        status,
+                        tenantId,
+                        attempt,
+                        TOKEN_MAX_RETRIES,
+                        wait,
                     )
-                    if (wait > 0) Thread.sleep(wait)
+                    waitBudget.sleepOrHandBack(wait, "Retrying the token request after $status")
                     continue
                 }
                 logger.error("Token request rejected ({}) for tenant [{}]", ex.statusCode, tenantId)
@@ -254,14 +337,23 @@ class GraphMailClientImpl(
                     )
                 }
                 val delay = boundedByDeadline(jitteredBackoff(backoffMs, divisor = 2), deadline)
-                logger.warn("Token request {} — attempt {}/{}, retrying in {}ms",
-                    ex.statusCode, attempt, TOKEN_MAX_RETRIES, delay)
-                if (delay > 0) Thread.sleep(delay)
+                logger.warn(
+                    "Token request {} — attempt {}/{}, retrying in {}ms",
+                    ex.statusCode,
+                    attempt,
+                    TOKEN_MAX_RETRIES,
+                    delay,
+                )
+                waitBudget.sleepOrHandBack(delay, "Retrying the token request after ${ex.statusCode}")
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             } catch (ex: RestClientException) {
                 if (attempt >= TOKEN_MAX_RETRIES) {
-                    logger.warn("Token request timed out for tenant [{}] after {} attempts: {}",
-                        tenantId, attempt, maskEmailsInText(ex.message))
+                    logger.warn(
+                        "Token request timed out for tenant [{}] after {} attempts: {}",
+                        tenantId,
+                        attempt,
+                        maskEmailsInText(ex.message),
+                    )
                     throw GraphMailRetryableException(
                         "Could not reach Azure Entra (timeout or network error) after $attempt attempts: " +
                             "${maskEmailsInText(ex.message)}",
@@ -269,9 +361,14 @@ class GraphMailClientImpl(
                     )
                 }
                 val delay = boundedByDeadline(jitteredBackoff(backoffMs, divisor = 2), deadline)
-                logger.warn("Token request network error — attempt {}/{}, retrying in {}ms: {}",
-                    attempt, TOKEN_MAX_RETRIES, delay, maskEmailsInText(ex.message))
-                if (delay > 0) Thread.sleep(delay)
+                logger.warn(
+                    "Token request network error — attempt {}/{}, retrying in {}ms: {}",
+                    attempt,
+                    TOKEN_MAX_RETRIES,
+                    delay,
+                    maskEmailsInText(ex.message),
+                )
+                waitBudget.sleepOrHandBack(delay, "Retrying the token request after a network error")
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             }
         }
@@ -312,11 +409,12 @@ class GraphMailClientImpl(
         var forceFreshToken = false
         var attempt = 0
         var backoffMs = INITIAL_BACKOFF_MS
+        val waitBudget = WaitBudget()
 
         while (true) {
             if (System.currentTimeMillis() > deadline) {
                 throw GraphMailRetryableException(
-                    "Timed out during $actionLabel after ${timeoutBudgetMs}ms"
+                    "Timed out during $actionLabel after ${timeoutBudgetMs}ms",
                 )
             }
             attempt++
@@ -377,7 +475,7 @@ class GraphMailClientImpl(
                                 .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000
                         val wait = retryAfterMs.coerceAtMost(deadline - System.currentTimeMillis())
                         logger.warn("429 Rate limited during {} — waiting {}ms", actionLabel, wait)
-                        if (wait > 0) Thread.sleep(wait)
+                        waitBudget.sleepOrHandBack(wait, "Waiting out a 429 during $actionLabel")
                     }
                     else -> {
                         val status = ex.statusCode.value()
@@ -423,7 +521,7 @@ class GraphMailClientImpl(
                     MAX_RETRIES,
                     delay,
                 )
-                if (delay > 0) Thread.sleep(delay)
+                waitBudget.sleepOrHandBack(delay, "Backing off after ${ex.statusCode} during $actionLabel")
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             } catch (ex: RestClientException) {
                 if (!retryOnTransportError && neverLeftTheClient(ex)) {
@@ -480,7 +578,7 @@ class GraphMailClientImpl(
                     MAX_RETRIES,
                     delay,
                 )
-                if (delay > 0) Thread.sleep(delay)
+                waitBudget.sleepOrHandBack(delay, "Backing off after a network error during $actionLabel")
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             }
         }
@@ -488,18 +586,25 @@ class GraphMailClientImpl(
 
     // Turns a bare status code into something an administrator reading the GZAC logs can act on,
     // instead of "Graph API rejected email send (403)" with no indication of what to change.
-    private fun remedyFor(status: Int, permissionHint: String): String = when (status) {
-        400 -> "Graph rejected the request payload — check the sender mailbox, recipient addresses " +
-            "and subject for values Graph considers malformed."
-        403 -> "Access denied — grant $permissionHint as an *application* permission on the Azure app " +
-            "registration and give it admin consent. If the permission is already granted, check " +
-            "whether an Exchange Online Application Access Policy excludes this mailbox."
-        404 -> "Mailbox not found — verify the sender mailbox exists in this tenant and is licensed " +
-            "for Exchange Online."
-        413 -> "Payload too large — reduce the attachment size or count."
-        422 -> "Graph could not process the message content — check the sanitised HTML body."
-        else -> "Check the mailbox and $permissionHint."
-    }
+    private fun remedyFor(
+        status: Int,
+        permissionHint: String,
+    ): String =
+        when (status) {
+            400 ->
+                "Graph rejected the request payload — check the sender mailbox, recipient addresses " +
+                    "and subject for values Graph considers malformed."
+            403 ->
+                "Access denied — grant $permissionHint as an *application* permission on the Azure app " +
+                    "registration and give it admin consent. If the permission is already granted, check " +
+                    "whether an Exchange Online Application Access Policy excludes this mailbox."
+            404 ->
+                "Mailbox not found — verify the sender mailbox exists in this tenant and is licensed " +
+                    "for Exchange Online."
+            413 -> "Payload too large — reduce the attachment size or count."
+            422 -> "Graph could not process the message content — check the sanitised HTML body."
+            else -> "Check the mailbox and $permissionHint."
+        }
 
     // True when the failure happened before anything could have been submitted to Graph: name
     // resolution, TCP connect, or the TLS handshake. Anything later (a reset or timeout while the
@@ -525,12 +630,18 @@ class GraphMailClientImpl(
         }
     }
 
-    override fun sendMail(credentials: GraphCredentials, mail: OutboundMail) {
+    override fun sendMail(
+        credentials: GraphCredentials,
+        mail: OutboundMail,
+    ) {
         require(mail.toRecipients.isNotEmpty()) { "At least one recipient is required" }
 
         val recipientCount = mail.toRecipients.size
-        logger.info("Sending email — recipients: {}, mailbox: '{}'",
-            recipientCount, maskEmail(mail.senderMailbox))
+        logger.info(
+            "Sending email — recipients: {}, mailbox: '{}'",
+            recipientCount,
+            maskEmail(mail.senderMailbox),
+        )
 
         // The total already covers the single-attachment case, so a separate `any { > threshold }`
         // check would be redundant.
@@ -538,14 +649,18 @@ class GraphMailClientImpl(
         val useDraftFlow = totalAttachmentBytes > INLINE_ATTACHMENT_THRESHOLD_BYTES
 
         if (useDraftFlow) {
-            logger.debug("Using draft+upload flow — {} attachment(s), total {} bytes",
-                mail.attachments.size, totalAttachmentBytes)
+            logger.debug(
+                "Using draft+upload flow — {} attachment(s), total {} bytes",
+                mail.attachments.size,
+                totalAttachmentBytes,
+            )
             sendViaDraftAndUpload(credentials, mail)
         } else {
-            val sendMailUri: URI = UriComponentsBuilder
-                .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/sendMail")
-                .buildAndExpand(mail.senderMailbox)
-                .toUri()
+            val sendMailUri: URI =
+                UriComponentsBuilder
+                    .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/sendMail")
+                    .buildAndExpand(mail.senderMailbox)
+                    .toUri()
             val payload = buildInlinePayload(mail)
             sendWithRefreshAndRetry(credentials, sendMailUri, payload, mail.senderMailbox)
         }
@@ -553,38 +668,44 @@ class GraphMailClientImpl(
     }
 
     private fun buildInlinePayload(mail: OutboundMail): SendMailRequest {
-        val inlineAttachments = mail.attachments.map { a ->
-            GraphAttachment(
-                name = a.name,
-                contentType = a.contentType,
-                contentBytes = Base64.getEncoder().encodeToString(a.rawBytes),
-            )
-        }
+        val inlineAttachments =
+            mail.attachments.map { a ->
+                GraphAttachment(
+                    name = a.name,
+                    contentType = a.contentType,
+                    contentBytes = Base64.getEncoder().encodeToString(a.rawBytes),
+                )
+            }
         return SendMailRequest(
-            message = GraphMessage(
+            message =
+                GraphMessage(
+                    subject = mail.subject,
+                    body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = mail.bodyHtml),
+                    toRecipients = mail.toRecipients,
+                    ccRecipients = mail.ccRecipients,
+                    bccRecipients = mail.bccRecipients,
+                    replyTo = mail.replyToRecipients,
+                    attachments = inlineAttachments,
+                ),
+            saveToSentItems = mail.saveToSentItems,
+        )
+    }
+
+    private fun sendViaDraftAndUpload(
+        credentials: GraphCredentials,
+        mail: OutboundMail,
+    ) {
+        val deadline = System.currentTimeMillis() + MAX_DRAFT_SEND_WALL_CLOCK_MS
+
+        val draftMessage =
+            GraphMessage(
                 subject = mail.subject,
                 body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = mail.bodyHtml),
                 toRecipients = mail.toRecipients,
                 ccRecipients = mail.ccRecipients,
                 bccRecipients = mail.bccRecipients,
                 replyTo = mail.replyToRecipients,
-                attachments = inlineAttachments,
-            ),
-            saveToSentItems = mail.saveToSentItems,
-        )
-    }
-
-    private fun sendViaDraftAndUpload(credentials: GraphCredentials, mail: OutboundMail) {
-        val deadline = System.currentTimeMillis() + MAX_DRAFT_SEND_WALL_CLOCK_MS
-
-        val draftMessage = GraphMessage(
-            subject = mail.subject,
-            body = GraphBody(contentType = GRAPH_BODY_CONTENT_TYPE_HTML, content = mail.bodyHtml),
-            toRecipients = mail.toRecipients,
-            ccRecipients = mail.ccRecipients,
-            bccRecipients = mail.bccRecipients,
-            replyTo = mail.replyToRecipients,
-        )
+            )
         val draftId = createDraftWithRetry(credentials, mail.senderMailbox, draftMessage, deadline)
         logger.debug("Draft created id={}", draftId)
 
@@ -606,14 +727,20 @@ class GraphMailClientImpl(
         sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
     }
 
-    private fun deleteDraftBestEffort(credentials: GraphCredentials, senderMailbox: String, draftId: String) {
+    private fun deleteDraftBestEffort(
+        credentials: GraphCredentials,
+        senderMailbox: String,
+        draftId: String,
+    ) {
         try {
-            val uri: URI = UriComponentsBuilder
-                .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}")
-                .buildAndExpand(senderMailbox, draftId)
-                .toUri()
+            val uri: URI =
+                UriComponentsBuilder
+                    .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}")
+                    .buildAndExpand(senderMailbox, draftId)
+                    .toUri()
             val token = getAccessToken(credentials)
-            restClient.delete()
+            restClient
+                .delete()
                 .uri(uri)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
                 .retrieve()
@@ -630,10 +757,11 @@ class GraphMailClientImpl(
         message: GraphMessage,
         deadline: Long,
     ): String {
-        val uri: URI = UriComponentsBuilder
-            .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages")
-            .buildAndExpand(senderMailbox)
-            .toUri()
+        val uri: URI =
+            UriComponentsBuilder
+                .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages")
+                .buildAndExpand(senderMailbox)
+                .toUri()
 
         return sendGraphRequestWithRetry(
             credentials,
@@ -666,18 +794,21 @@ class GraphMailClientImpl(
         attachment: ResolvedAttachment,
         deadline: Long,
     ): String {
-        val uri: URI = UriComponentsBuilder
-            .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}/attachments/createUploadSession")
-            .buildAndExpand(senderMailbox, draftId)
-            .toUri()
+        val uri: URI =
+            UriComponentsBuilder
+                .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}/attachments/createUploadSession")
+                .buildAndExpand(senderMailbox, draftId)
+                .toUri()
 
-        val body = CreateUploadSessionRequest(
-            attachmentItem = UploadAttachmentItem(
-                name = attachment.name,
-                size = attachment.sizeBytes,
-                contentType = attachment.contentType,
+        val body =
+            CreateUploadSessionRequest(
+                attachmentItem =
+                    UploadAttachmentItem(
+                        name = attachment.name,
+                        size = attachment.sizeBytes,
+                        contentType = attachment.contentType,
+                    ),
             )
-        )
 
         val uploadUrl =
             sendGraphRequestWithRetry(
@@ -713,15 +844,17 @@ class GraphMailClientImpl(
     private fun validateUploadUrl(uploadUrl: String) {
         val uri = runCatching { java.net.URI.create(uploadUrl) }.getOrNull()
         val host = uri?.host
-        val valid = if (requireMicrosoftUploadHost) {
-            uri?.scheme == "https" && host != null &&
-                MICROSOFT_UPLOAD_HOST_SUFFIXES.any { host == it.removePrefix(".") || host.endsWith(it) }
-        } else {
-            // Sandbox/test endpoint: accept only the very host we are already talking to, never an
-            // arbitrary third one.
-            val expected = runCatching { java.net.URI.create(graphBaseUrl) }.getOrNull()
-            uri?.scheme == expected?.scheme && host != null && host == expected?.host
-        }
+        val valid =
+            if (requireMicrosoftUploadHost) {
+                uri?.scheme == "https" &&
+                    host != null &&
+                    MICROSOFT_UPLOAD_HOST_SUFFIXES.any { host == it.removePrefix(".") || host.endsWith(it) }
+            } else {
+                // Sandbox/test endpoint: accept only the very host we are already talking to, never an
+                // arbitrary third one.
+                val expected = runCatching { java.net.URI.create(graphBaseUrl) }.getOrNull()
+                uri?.scheme == expected?.scheme && host != null && host == expected?.host
+            }
         // Typed rather than require(): an IllegalArgumentException would be classified as
         // PERMANENT_INPUT and tell the administrator to correct the process data, when the actual
         // cause is an unexpected host in a Graph response.
@@ -735,16 +868,23 @@ class GraphMailClientImpl(
         }
     }
 
-    private fun uploadInChunks(uploadUrl: String, attachment: ResolvedAttachment, deadline: Long) {
+    private fun uploadInChunks(
+        uploadUrl: String,
+        attachment: ResolvedAttachment,
+        deadline: Long,
+    ) {
         val bytes = attachment.rawBytes
         val total = bytes.size.toLong()
         var offset = 0L
         var stalls = 0
+        val waitBudget = WaitBudget()
 
         while (offset < total) {
-            if (System.currentTimeMillis() > deadline)
+            if (System.currentTimeMillis() > deadline) {
                 throw GraphMailRetryableException(
-                    "Attachment upload timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms")
+                    "Attachment upload timed out after ${MAX_DRAFT_SEND_WALL_CLOCK_MS}ms",
+                )
+            }
 
             val end = minOf(offset + UPLOAD_CHUNK_BYTES - 1, total - 1)
             val chunkLen = (end - offset + 1).toInt()
@@ -755,14 +895,16 @@ class GraphMailClientImpl(
             while (nextOffset == null) {
                 chunkAttempt++
                 try {
-                    val response = restClient.put()
-                        .uri(URI.create(uploadUrl))
-                        .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                        .contentLength(chunkLen.toLong())
-                        .header("Content-Range", "bytes $offset-$end/$total")
-                        .body(chunk)
-                        .retrieve()
-                        .toEntity(UploadChunkResponse::class.java)
+                    val response =
+                        restClient
+                            .put()
+                            .uri(URI.create(uploadUrl))
+                            .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                            .contentLength(chunkLen.toLong())
+                            .header("Content-Range", "bytes $offset-$end/$total")
+                            .body(chunk)
+                            .retrieve()
+                            .toEntity(UploadChunkResponse::class.java)
                     // Let the server decide where to continue. Graph reports what it actually holds
                     // in nextExpectedRanges; blindly advancing our own offset after a retry can put
                     // the client out of step with the server and corrupt the attachment.
@@ -779,14 +921,20 @@ class GraphMailClientImpl(
                     // this client. Failing hard on it throws away the whole upload — and the draft —
                     // over a condition that clears by itself in seconds.
                     if (ex.statusCode.value() == 429 && chunkAttempt < CHUNK_MAX_RETRIES) {
-                        val wait = (parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
-                            .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000)
-                            .coerceAtMost(deadline - System.currentTimeMillis())
+                        val wait =
+                            (
+                                parseRetryAfter(ex.responseHeaders?.getFirst("Retry-After"))
+                                    .coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1000
+                            ).coerceAtMost(deadline - System.currentTimeMillis())
                         logger.warn(
                             "429 during chunk upload of '{}' at offset {} — attempt {}/{}, waiting {}ms",
-                            attachment.name, offset, chunkAttempt, CHUNK_MAX_RETRIES, wait,
+                            attachment.name,
+                            offset,
+                            chunkAttempt,
+                            CHUNK_MAX_RETRIES,
+                            wait,
                         )
-                        if (wait > 0) Thread.sleep(wait)
+                        waitBudget.sleepOrHandBack(wait, "Waiting out a 429 during chunk upload")
                         continue
                     }
                     val status = ex.statusCode.value()
@@ -794,30 +942,40 @@ class GraphMailClientImpl(
                         "Chunk upload of '${attachment.name}' rejected ($status) at offset $offset of $total"
                     throw if (status == 429) {
                         GraphMailRetryableException(
-                            "$message after $CHUNK_MAX_RETRIES attempts", ex, statusCode = status)
+                            "$message after $CHUNK_MAX_RETRIES attempts",
+                            ex,
+                            statusCode = status,
+                        )
                     } else {
                         GraphMailPermanentException(message, ex, statusCode = status)
                     }
                 } catch (ex: HttpServerErrorException) {
-                    if (chunkAttempt >= CHUNK_MAX_RETRIES)
+                    if (chunkAttempt >= CHUNK_MAX_RETRIES) {
                         throw GraphMailRetryableException(
                             "Chunk upload of '${attachment.name}' failed after $CHUNK_MAX_RETRIES " +
                                 "attempts at offset $offset (${ex.statusCode})",
-                            ex, statusCode = ex.statusCode.value())
-                    val delay = (500L * (1 shl (chunkAttempt - 1)))
-                        .coerceAtMost(deadline - System.currentTimeMillis())
-                    if (delay > 0) Thread.sleep(delay)
+                            ex,
+                            statusCode = ex.statusCode.value(),
+                        )
+                    }
+                    val delay =
+                        (500L * (1 shl (chunkAttempt - 1)))
+                            .coerceAtMost(deadline - System.currentTimeMillis())
+                    waitBudget.sleepOrHandBack(delay, "Backing off after ${ex.statusCode} during chunk upload")
                 } catch (ex: RestClientException) {
                     // A chunk PUT is idempotent — the same byte range can safely be re-sent — so
                     // unlike the send calls this transport retry cannot duplicate anything.
-                    if (chunkAttempt >= CHUNK_MAX_RETRIES)
+                    if (chunkAttempt >= CHUNK_MAX_RETRIES) {
                         throw GraphMailRetryableException(
                             "Chunk upload of '${attachment.name}' unreachable after " +
                                 "$CHUNK_MAX_RETRIES attempts at offset $offset",
-                            ex)
-                    val delay = (500L * (1 shl (chunkAttempt - 1)))
-                        .coerceAtMost(deadline - System.currentTimeMillis())
-                    if (delay > 0) Thread.sleep(delay)
+                            ex,
+                        )
+                    }
+                    val delay =
+                        (500L * (1 shl (chunkAttempt - 1)))
+                            .coerceAtMost(deadline - System.currentTimeMillis())
+                    waitBudget.sleepOrHandBack(delay, "Backing off after a network error during chunk upload")
                 }
             }
             // Graph's reported range is authoritative, including when it points *backwards*: that
@@ -845,7 +1003,11 @@ class GraphMailClientImpl(
                 logger.warn(
                     "Graph asked to resume the upload of '{}' at offset {} instead of advancing " +
                         "past {} — re-sending from there ({}/{})",
-                    attachment.name, nextOffset, end, stalls, MAX_UPLOAD_STALLS,
+                    attachment.name,
+                    nextOffset,
+                    end,
+                    stalls,
+                    MAX_UPLOAD_STALLS,
                 )
             }
             offset = nextOffset
@@ -858,10 +1020,11 @@ class GraphMailClientImpl(
         draftId: String,
         deadline: Long,
     ) {
-        val uri: URI = UriComponentsBuilder
-            .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}/send")
-            .buildAndExpand(senderMailbox, draftId)
-            .toUri()
+        val uri: URI =
+            UriComponentsBuilder
+                .fromUriString("$graphBaseUrl/v1.0/users/{mailbox}/messages/{id}/send")
+                .buildAndExpand(senderMailbox, draftId)
+                .toUri()
 
         sendGraphRequestWithRetry(
             credentials,

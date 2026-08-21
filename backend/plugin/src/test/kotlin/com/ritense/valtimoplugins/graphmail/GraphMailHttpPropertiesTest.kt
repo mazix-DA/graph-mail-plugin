@@ -15,19 +15,21 @@ class GraphMailHttpPropertiesTest {
     }
 
     @Test fun `sovereign cloud endpoints are accepted`() {
-        val properties = GraphMailHttpProperties(
-            tokenBaseUrl = "https://login.microsoftonline.us",
-            graphBaseUrl = "https://graph.microsoft.us",
-        )
+        val properties =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.microsoftonline.us",
+                graphBaseUrl = "https://graph.microsoft.us",
+            )
         assertTrue(properties.isProductionGraphEndpoint())
     }
 
     @Test fun `a foreign token endpoint is rejected`() {
         // This is the exfiltration path the allowlist exists for: the client secret is POSTed to
         // tokenBaseUrl as a form field, so a host outside the allowlist means handing it over.
-        val ex = assertThrows(IllegalArgumentException::class.java) {
-            GraphMailHttpProperties(tokenBaseUrl = "https://attacker.example")
-        }
+        val ex =
+            assertThrows(IllegalArgumentException::class.java) {
+                GraphMailHttpProperties(tokenBaseUrl = "https://attacker.example")
+            }
         assertTrue(ex.message!!.contains("token-base-url"))
     }
 
@@ -50,19 +52,21 @@ class GraphMailHttpPropertiesTest {
     }
 
     @Test fun `the test escape hatch allows a local endpoint and reports it as non-production`() {
-        val properties = GraphMailHttpProperties(
-            tokenBaseUrl = "http://localhost:8089",
-            graphBaseUrl = "http://localhost:8089",
-            allowNonMicrosoftEndpoints = true,
-        )
+        val properties =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "http://localhost:8089",
+                graphBaseUrl = "http://localhost:8089",
+                allowNonMicrosoftEndpoints = true,
+            )
         // The strict upload-host check must switch off exactly here, and nowhere else.
         assertFalse(properties.isProductionGraphEndpoint())
     }
 
     @Test fun `a zero timeout is rejected because it means wait forever`() {
-        val ex = assertThrows(IllegalArgumentException::class.java) {
-            GraphMailHttpProperties(connectTimeoutSeconds = 0)
-        }
+        val ex =
+            assertThrows(IllegalArgumentException::class.java) {
+                GraphMailHttpProperties(connectTimeoutSeconds = 0)
+            }
         assertTrue(ex.message!!.contains("connect-timeout-seconds"))
     }
 

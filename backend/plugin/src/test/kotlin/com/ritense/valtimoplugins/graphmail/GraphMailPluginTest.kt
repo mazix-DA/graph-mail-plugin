@@ -16,7 +16,6 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.ritense.resource.service.TemporaryResourceStorageService
-import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -30,6 +29,7 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.springframework.context.ApplicationEventPublisher
 import java.io.ByteArrayInputStream
 import java.util.concurrent.CountDownLatch
@@ -40,27 +40,40 @@ private const val VALID_CONTENT_UUID = "22222222-2222-2222-2222-222222222222"
 private const val VALID_UUID = "11111111-1111-1111-1111-111111111111"
 
 class GraphMailPluginTest {
-
     private val mailClient: GraphMailClient = mock()
     private val storage: TemporaryResourceStorageService = mock()
     private val execution: DelegateExecution = mock()
     private val eventPublisher: ApplicationEventPublisher = mock()
     private lateinit var plugin: GraphMailPlugin
 
+    // Stands in for the process instance's variable map.
+    private val processVariables = mutableMapOf<String, Any?>()
+
     @BeforeEach
     fun setUp() {
-        plugin = GraphMailPlugin(mailClient, storage, eventPublisher).apply {
-            tenantId = "test-tenant"
-            clientId = "test-client"
-            clientSecret = "test-secret"
-            allowedSenders = "@test.nl"
-        }
+        processVariables.clear()
+        plugin =
+            GraphMailPlugin(mailClient, storage, eventPublisher).apply {
+                tenantId = "test-tenant"
+                clientId = "test-client"
+                clientSecret = "test-secret"
+                allowedSenders = "@test.nl"
+            }
         whenever(execution.id).thenReturn("execution-1")
         whenever(execution.processInstanceId).thenReturn("process-1")
         whenever(execution.currentActivityId).thenReturn("send-email-task")
-        // The duplicate guard keys on the activity *instance*, which is what distinguishes a
-        // retry of one attempt from a fresh pass over the same task in a loop.
-        whenever(execution.activityInstanceId).thenReturn("send-email-task:instance-1")
+
+        // The duplicate guard keys on a pass counter held in a process variable, so the mock has to
+        // behave like a real execution: what setVariable writes, getVariable reads back. Stubbing
+        // getVariable to a constant would make every test look like a first pass and hide exactly
+        // the behaviour these specs are here to pin down.
+        whenever(execution.setVariable(any(), any())).thenAnswer { invocation ->
+            processVariables[invocation.getArgument(0)] = invocation.getArgument(1)
+            null
+        }
+        whenever(execution.getVariable(any())).thenAnswer { invocation ->
+            processVariables[invocation.getArgument<String>(0)]
+        }
         // thenAnswer (not thenReturn) — a fresh stream per call, matching a real storage
         // service; thenReturn would hand back the same already-consumed/closed stream on a
         // second sendEmail() call within one test (e.g. the idempotency retry tests below).
@@ -80,6 +93,14 @@ class GraphMailPluginTest {
     ) = plugin.sendEmail(execution, mailbox, to, cc, bcc, replyTo, subject, body, attachments)
 
     private fun verifySend() = verify(mailClient).sendMail(any(), any())
+
+    // A job-executor retry re-runs the activity after the transaction rolled back, which undoes the
+    // pass-counter increment. Calling send() twice in a row is NOT a retry — that is two committed
+    // passes, and the guard is supposed to let both through.
+    private fun rollBackTransaction(activityId: String = "send-email-task") {
+        val key = "$PASS_COUNTER_VARIABLE_PREFIX$activityId"
+        processVariables[key] = ((processVariables[key] as? Int) ?: 1) - 1
+    }
 
     private fun mockBodyHtml(html: String) {
         whenever(storage.getResourceContentAsInputStream(VALID_CONTENT_UUID))
@@ -145,14 +166,24 @@ class GraphMailPluginTest {
 
     @Test fun `rejects send when allowedSenders is not configured`() {
         // Simulates a pre-allowlist plugin configuration where Valtimo never injected the property.
-        val legacyPlugin = GraphMailPlugin(mailClient, storage, eventPublisher).apply {
-            tenantId = "test-tenant"
-            clientId = "test-client"
-            clientSecret = "test-secret"
-        }
+        val legacyPlugin =
+            GraphMailPlugin(mailClient, storage, eventPublisher).apply {
+                tenantId = "test-tenant"
+                clientId = "test-client"
+                clientSecret = "test-secret"
+            }
         assertThrows<IllegalStateException> {
-            legacyPlugin.sendEmail(execution, "afzender@test.nl", "ontvanger@test.nl",
-                null, null, null, "Test", VALID_CONTENT_UUID, null)
+            legacyPlugin.sendEmail(
+                execution,
+                "afzender@test.nl",
+                "ontvanger@test.nl",
+                null,
+                null,
+                null,
+                "Test",
+                VALID_CONTENT_UUID,
+                null,
+            )
         }
     }
 
@@ -316,7 +347,11 @@ class GraphMailPluginTest {
         send(to = "a@t.nl,b@t.nl,c@t.nl")
         verify(mailClient).sendMail(any(), captor.capture())
         assertEquals(3, captor.firstValue.toRecipients.size)
-        assertEquals("a@t.nl", captor.firstValue.toRecipients[0].emailAddress.address)
+        assertEquals(
+            "a@t.nl",
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
+        )
     }
 
     @Test fun `ignores blank entries in recipient list`() {
@@ -331,14 +366,19 @@ class GraphMailPluginTest {
         send(to = """["a@t.nl","b@t.nl"]""")
         verify(mailClient).sendMail(any(), captor.capture())
         assertEquals(2, captor.firstValue.toRecipients.size)
-        assertEquals("a@t.nl", captor.firstValue.toRecipients[0].emailAddress.address)
+        assertEquals(
+            "a@t.nl",
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
+        )
     }
 
     // ── Attachments ──────────────────────────────────────────────────────────────
 
     @Test fun `resolves attachments from storage`() {
         whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
-            mapOf("fileName" to "doc.pdf", "contentType" to "application/pdf"))
+            mapOf("fileName" to "doc.pdf", "contentType" to "application/pdf"),
+        )
         whenever(storage.getResourceContentAsInputStream(VALID_UUID))
             .thenReturn(ByteArrayInputStream("data".toByteArray()))
 
@@ -359,7 +399,8 @@ class GraphMailPluginTest {
     @Test fun `accepts attachment up to 25 MB`() {
         val bigBytes = ByteArray(MAX_SINGLE_ATTACHMENT_BYTES.toInt())
         whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
-            mapOf("fileName" to "large.bin", "contentType" to "application/octet-stream"))
+            mapOf("fileName" to "large.bin", "contentType" to "application/octet-stream"),
+        )
         whenever(storage.getResourceContentAsInputStream(VALID_UUID))
             .thenReturn(ByteArrayInputStream(bigBytes))
         send(attachments = VALID_UUID)
@@ -379,7 +420,8 @@ class GraphMailPluginTest {
     @Test fun `rejects single attachment exceeding size cap`() {
         val oversized = ByteArray((MAX_SINGLE_ATTACHMENT_BYTES + 1).toInt())
         whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
-            mapOf("fileName" to "big.bin", "contentType" to "application/octet-stream"))
+            mapOf("fileName" to "big.bin", "contentType" to "application/octet-stream"),
+        )
         whenever(storage.getResourceContentAsInputStream(VALID_UUID))
             .thenReturn(ByteArrayInputStream(oversized))
         assertThrows<IllegalArgumentException> { send(attachments = VALID_UUID) }
@@ -390,31 +432,41 @@ class GraphMailPluginTest {
         // queueing for a permit would have every thread allocate its full payload before waiting,
         // so the limit would bound concurrency without bounding memory — the thing it exists for.
         val limiter = AttachmentConcurrencyLimiter(permits = 1, acquireTimeoutMs = 100)
-        val gatedPlugin = GraphMailPlugin(mailClient, storage, eventPublisher, SendIdempotencyGuard(), limiter)
-            .apply {
-                tenantId = "test-tenant"
-                clientId = "test-client"
-                clientSecret = "test-secret"
-                allowedSenders = "@test.nl"
-            }
+        val gatedPlugin =
+            GraphMailPlugin(mailClient, storage, eventPublisher, SendIdempotencyGuard(), limiter)
+                .apply {
+                    tenantId = "test-tenant"
+                    clientId = "test-client"
+                    clientSecret = "test-secret"
+                    allowedSenders = "@test.nl"
+                }
         whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
-            mapOf("fileName" to "a.bin", "contentType" to "application/octet-stream"))
+            mapOf("fileName" to "a.bin", "contentType" to "application/octet-stream"),
+        )
 
         val holding = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val hog = Thread {
-            limiter.withPermit(hasAttachments = true) {
-                holding.countDown()
-                release.await(5, TimeUnit.SECONDS)
+        val hog =
+            Thread {
+                limiter.withPermit(hasAttachments = true) {
+                    holding.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                }
             }
-        }
         hog.start()
         assertTrue(holding.await(5, TimeUnit.SECONDS), "permit holder did not start")
 
         assertThrows<GraphMailRetryableException> {
             gatedPlugin.sendEmail(
-                execution, "afzender@test.nl", "ontvanger@test.nl", null, null, null,
-                "Test", VALID_CONTENT_UUID, VALID_UUID,
+                execution,
+                "afzender@test.nl",
+                "ontvanger@test.nl",
+                null,
+                null,
+                null,
+                "Test",
+                VALID_CONTENT_UUID,
+                VALID_UUID,
             )
         }
 
@@ -452,26 +504,38 @@ class GraphMailPluginTest {
 
     // ── Idempotency (retry after transaction rollback) ─────────────────────────────
 
-    @Test fun `retrying the same activity instance after a successful send does not send twice`() {
-        // Simulates: sendEmail succeeds, the surrounding Operaton transaction then rolls back
-        // for an unrelated reason, and the job-executor retries the same activity instance.
+    @Test fun `retrying after a rolled-back successful send does not send twice`() {
+        // sendEmail succeeds, the surrounding Operaton transaction then rolls back for an unrelated
+        // reason, and the job executor re-runs the activity. The rollback takes the pass-counter
+        // increment with it, so the retry produces the same key.
         send()
+        rollBackTransaction()
         send()
+
         verify(mailClient, times(1)).sendMail(any(), any())
     }
 
-    @Test fun `retrying the same activity instance after a successful send does not publish a second event`() {
+    @Test fun `retrying after a rolled-back successful send does not publish a second event`() {
         // A skipped duplicate is not a new send — publishing GraphMailEmailSentEvent again would
         // mislead any listener that counts emails sent.
         send()
+        rollBackTransaction()
         send()
+
         verify(eventPublisher, times(1)).publishEvent(any<GraphMailEmailSentEvent>())
     }
 
-    @Test fun `a concurrent duplicate racing the cheap early-exit check still cannot send twice`() {
-        // Simulates the rare race the cheap alreadySent() pre-check can miss: two callers reach
+    @Test fun `two callers landing on the same key cannot both send`() {
+        // Covers the rare race the cheap alreadySent() pre-check can miss: two callers reach
         // ifNotAlreadySent for the same key at (almost) the same time. The per-key lock inside
         // SendIdempotencyGuard must serialise them so only one actually calls mailClient.sendMail.
+        //
+        // The counter is pinned so both callers derive the same key. Letting them each read and
+        // advance it would hand them different keys and test nothing: Operaton never runs one
+        // execution on two threads at once, so concurrent key derivation is not a real scenario —
+        // what is real is two attempts that resolve to the same key reaching the guard together.
+        whenever(execution.getVariable(any())).thenReturn(0)
+
         val startedLatch = CountDownLatch(1)
         val releaseLatch = CountDownLatch(1)
         whenever(mailClient.sendMail(any(), any())).thenAnswer {
@@ -585,41 +649,49 @@ class GraphMailPluginTest {
     }
 
     @Test fun `a second loop iteration over the same activity is not treated as a duplicate`() {
-        // Regression: the guard used to key on execution.id + currentActivityId. A flow that loops
-        // back to the same service task keeps both values, so every iteration after the first was
-        // silently dropped — the process carried on as if the email had gone out.
+        // A committed pass advances the counter, so the next pass over the same task gets a new key.
+        // ActivityInstanceIdContractTest verifies against a real engine that this is what the
+        // counter actually does.
         send()
 
-        whenever(execution.activityInstanceId).thenReturn("send-email-task:instance-2")
         send()
 
         verify(mailClient, times(2)).sendMail(any(), any())
     }
 
-    @Test fun `a retry of the same activity instance is still suppressed`() {
+    @Test fun `a retry after a rolled-back attempt is suppressed`() {
+        // The guard's whole reason for existing. A rollback takes the counter increment with it, so
+        // the retry reads the same number and produces the same key.
         send()
-        send()
+        val counterAfterFirstSend = processVariables["${PASS_COUNTER_VARIABLE_PREFIX}send-email-task"]
 
-        verify(mailClient, times(1)).sendMail(any(), any())
-    }
-
-    @Test fun `falls back to the execution key when no activity instance id is available`() {
-        whenever(execution.activityInstanceId).thenReturn(null)
-
-        send()
+        // Simulate the transaction rolling back: the increment is undone.
+        processVariables["${PASS_COUNTER_VARIABLE_PREFIX}send-email-task"] =
+            (counterAfterFirstSend as Int) - 1
         send()
 
         verify(mailClient, times(1)).sendMail(any(), any())
     }
 
-    @Test fun `a different activity on the same execution is not treated as a duplicate`() {
-        // Same process execution, different activity (e.g. a second send-email task later in the
-        // flow) — must not be mistaken for a retry of the first.
+    @Test fun `two send-email tasks in one process count independently`() {
+        // The counter is per activity, so a second task must not inherit the first task's number.
         send()
+
         whenever(execution.currentActivityId).thenReturn("send-email-task-2")
-        whenever(execution.activityInstanceId).thenReturn("send-email-task-2:instance-1")
         send()
+
         verify(mailClient, times(2)).sendMail(any(), any())
+        assertEquals(1, processVariables["${PASS_COUNTER_VARIABLE_PREFIX}send-email-task"])
+        assertEquals(1, processVariables["${PASS_COUNTER_VARIABLE_PREFIX}send-email-task-2"])
+    }
+
+    @Test fun `the counter is namespaced so it cannot collide with process data`() {
+        send()
+
+        assertTrue(
+            processVariables.keys.all { it.startsWith(PASS_COUNTER_VARIABLE_PREFIX) },
+            "the plugin wrote an unexpected process variable: ${processVariables.keys}",
+        )
     }
 
     @Test fun `a failed send is not marked as sent, so a genuine retry after failure still sends`() {

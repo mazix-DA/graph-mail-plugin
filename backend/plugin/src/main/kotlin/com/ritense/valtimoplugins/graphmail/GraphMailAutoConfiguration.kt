@@ -30,7 +30,6 @@ import java.time.Duration
 @EnableAspectJAutoProxy
 @EnableConfigurationProperties(GraphMailHttpProperties::class)
 class GraphMailAutoConfiguration {
-
     private val logger = LoggerFactory.getLogger(GraphMailAutoConfiguration::class.java)
 
     // Fired once after the full application context is ready.
@@ -45,7 +44,7 @@ class GraphMailAutoConfiguration {
                 "Set operaton.bpm.job-executor.core-pool-size >= 20 and max-pool-size >= 50 " +
                 "to prevent job-executor starvation under load, and configure a " +
                 "failedJobRetryTimeCycle on the send-email service task. " +
-                "See documentation/plugin.md for details."
+                "See documentation/plugin.md for details.",
         )
     }
 
@@ -65,29 +64,32 @@ class GraphMailAutoConfiguration {
         objectMapper: ObjectMapper,
         properties: GraphMailHttpProperties,
     ): RestClient {
-        val httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            // Pinned to HTTP/1.1 deliberately. The JDK client defaults to HTTP/2, which would make
-            // this refactor change the wire protocol as a side effect of adding pooling — the
-            // previous RestTemplate spoke HTTP/1.1. Connection reuse, the entire point here, comes
-            // from keep-alive and works exactly the same on 1.1, while HTTP/2 adds a variable that
-            // egress proxies and middleboxes in government networks do not always handle. Revisit
-            // as a deliberate, separately tested change rather than as a silent one.
-            .version(HttpClient.Version.HTTP_1_1)
-            .build()
+        val httpClient =
+            HttpClient
+                .newBuilder()
+                .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                // Pinned to HTTP/1.1 deliberately. The JDK client defaults to HTTP/2, which would make
+                // this refactor change the wire protocol as a side effect of adding pooling — the
+                // previous RestTemplate spoke HTTP/1.1. Connection reuse, the entire point here, comes
+                // from keep-alive and works exactly the same on 1.1, while HTTP/2 adds a variable that
+                // egress proxies and middleboxes in government networks do not always handle. Revisit
+                // as a deliberate, separately tested change rather than as a silent one.
+                .version(HttpClient.Version.HTTP_1_1)
+                .build()
 
-        val requestFactory = JdkClientHttpRequestFactory(httpClient).apply {
-            setReadTimeout(Duration.ofSeconds(properties.readTimeoutSeconds))
-        }
+        val requestFactory =
+            JdkClientHttpRequestFactory(httpClient).apply {
+                setReadTimeout(Duration.ofSeconds(properties.readTimeoutSeconds))
+            }
 
-        return RestClient.builder()
+        return RestClient
+            .builder()
             .requestFactory(requestFactory)
             .messageConverters { converters ->
                 converters.removeIf { it is MappingJackson2HttpMessageConverter }
                 converters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
-            }
-            .build()
+            }.build()
     }
 
     // Requires the client secret to be re-entered whenever the sender allowlist changes — the

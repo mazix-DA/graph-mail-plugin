@@ -42,5 +42,5 @@ internal fun buildTestMailBody(sender: String): String {
           </p>
         </body>
         </html>
-    """.trimIndent()
+        """.trimIndent()
 }

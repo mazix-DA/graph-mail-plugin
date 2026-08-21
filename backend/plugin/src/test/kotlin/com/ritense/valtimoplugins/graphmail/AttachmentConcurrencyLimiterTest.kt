@@ -16,12 +16,13 @@ class AttachmentConcurrencyLimiterTest {
         val blocker = CountDownLatch(1)
         val holding = CountDownLatch(1)
 
-        val hog = Thread {
-            limiter.withPermit(hasAttachments = true) {
-                holding.countDown()
-                blocker.await(5, TimeUnit.SECONDS)
+        val hog =
+            Thread {
+                limiter.withPermit(hasAttachments = true) {
+                    holding.countDown()
+                    blocker.await(5, TimeUnit.SECONDS)
+                }
             }
-        }
         hog.start()
         assertTrue(holding.await(5, TimeUnit.SECONDS), "permit holder did not start")
 
@@ -37,18 +38,20 @@ class AttachmentConcurrencyLimiterTest {
         val holding = CountDownLatch(1)
         val error = AtomicReference<Throwable?>()
 
-        val hog = Thread {
-            limiter.withPermit(hasAttachments = true) {
-                holding.countDown()
-                blocker.await(5, TimeUnit.SECONDS)
+        val hog =
+            Thread {
+                limiter.withPermit(hasAttachments = true) {
+                    holding.countDown()
+                    blocker.await(5, TimeUnit.SECONDS)
+                }
             }
-        }
         hog.start()
         assertTrue(holding.await(5, TimeUnit.SECONDS), "permit holder did not start")
 
-        val ex = assertThrows(GraphMailRetryableException::class.java) {
-            limiter.withPermit(hasAttachments = true) { "never reached" }
-        }
+        val ex =
+            assertThrows(GraphMailRetryableException::class.java) {
+                limiter.withPermit(hasAttachments = true) { "never reached" }
+            }
         // Retryable on purpose: the engine reschedules without holding a thread, which is what
         // makes capping concurrency safe rather than lossy.
         assertTrue(ex.message!!.contains("attachment-concurrency"))
@@ -76,17 +79,18 @@ class AttachmentConcurrencyLimiterTest {
         val peak = AtomicInteger(0)
         val start = CountDownLatch(1)
 
-        val threads = (1..20).map {
-            Thread {
-                start.await(5, TimeUnit.SECONDS)
-                limiter.withPermit(hasAttachments = true) {
-                    val now = inFlight.incrementAndGet()
-                    peak.updateAndGet { previous -> maxOf(previous, now) }
-                    Thread.sleep(10)
-                    inFlight.decrementAndGet()
+        val threads =
+            (1..20).map {
+                Thread {
+                    start.await(5, TimeUnit.SECONDS)
+                    limiter.withPermit(hasAttachments = true) {
+                        val now = inFlight.incrementAndGet()
+                        peak.updateAndGet { previous -> maxOf(previous, now) }
+                        Thread.sleep(10)
+                        inFlight.decrementAndGet()
+                    }
                 }
             }
-        }
         threads.forEach { it.start() }
         start.countDown()
         threads.forEach { it.join(15_000) }

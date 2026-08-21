@@ -41,17 +41,20 @@ private const val VALID_RECIPIENT = "recipient@test.nl"
 private const val VALID_SENDER = "sender@test.nl"
 
 class GraphMailTestSendControllerTest {
-
     private val mailClient: GraphMailClient = mock()
     private val pluginService: PluginService = mock()
     private val storage: TemporaryResourceStorageService = mock()
     private val eventPublisher: ApplicationEventPublisher = mock()
-    private val authentication: Authentication = mock<Authentication>().also {
-        whenever(it.name).thenReturn("test-admin")
-    }
+    private val authentication: Authentication =
+        mock<Authentication>().also {
+            whenever(it.name).thenReturn("test-admin")
+        }
     private lateinit var controller: GraphMailTestSendController
 
-    private fun plugin(sender: String? = VALID_SENDER, allowlist: String? = "@test.nl"): GraphMailPlugin =
+    private fun plugin(
+        sender: String? = VALID_SENDER,
+        allowlist: String? = "@test.nl",
+    ): GraphMailPlugin =
         GraphMailPlugin(mailClient, storage, eventPublisher).apply {
             tenantId = "tenant-id"
             clientId = "client-id"
@@ -66,13 +69,16 @@ class GraphMailTestSendControllerTest {
         controller = GraphMailTestSendController(mailClient, pluginService, eventPublisher)
     }
 
-    private fun send(request: GraphMailTestSendRequest = GraphMailTestSendRequest(VALID_CONFIG_ID, VALID_RECIPIENT, VALID_SENDER)) =
-        controller.testSend(request, authentication)
+    private fun send(
+        request: GraphMailTestSendRequest = GraphMailTestSendRequest(VALID_CONFIG_ID, VALID_RECIPIENT, VALID_SENDER),
+    ) = controller.testSend(request, authentication)
 
     private fun stubSendMail() = whenever(mailClient.sendMail(any(), any()))
 
-    private fun stubPlugin(sender: String? = VALID_SENDER, allowlist: String? = "@test.nl") =
-        whenever(pluginService.createInstance(any<PluginConfigurationId>())).thenReturn(plugin(sender, allowlist))
+    private fun stubPlugin(
+        sender: String? = VALID_SENDER,
+        allowlist: String? = "@test.nl",
+    ) = whenever(pluginService.createInstance(any<PluginConfigurationId>())).thenReturn(plugin(sender, allowlist))
 
     // ── Input validation ──────────────────────────────────────────────────────────
 
@@ -235,7 +241,11 @@ class GraphMailTestSendControllerTest {
         val captor = argumentCaptor<OutboundMail>()
         verify(mailClient).sendMail(any(), captor.capture())
         assertEquals(1, captor.firstValue.toRecipients.size)
-        assertEquals(VALID_RECIPIENT, captor.firstValue.toRecipients[0].emailAddress.address)
+        assertEquals(
+            VALID_RECIPIENT,
+            captor.firstValue.toRecipients[0]
+                .emailAddress.address,
+        )
     }
 
     @Test fun `sends with saveToSentItems false`() {
@@ -278,7 +288,7 @@ class GraphMailTestSendControllerTest {
             GraphMailException(
                 """I/O error on POST request for "https://graph.microsoft.com/v1.0/users/geheim@gemeente.nl/sendMail"""",
                 statusCode = 500,
-            )
+            ),
         )
 
         val response = send()

@@ -25,7 +25,10 @@ internal fun isValidEmail(value: String) = value.length <= 254 && !value.contain
 // Matching is case-insensitive. An empty allowlist permits nothing.
 // The domain match anchors on the sender's own '@' separator, so "@example.com"
 // does not match "user@sub.example.com".
-internal fun isSenderAllowed(sender: String, allowlist: List<String>): Boolean {
+internal fun isSenderAllowed(
+    sender: String,
+    allowlist: List<String>,
+): Boolean {
     val normalizedSender = sender.trim().lowercase()
     val senderAt = normalizedSender.indexOf('@')
     if (senderAt <= 0) return false
@@ -68,8 +71,7 @@ internal fun maskEmail(address: String): String {
 internal fun maskEmails(addresses: Collection<String>): String = addresses.joinToString(", ") { maskEmail(it) }
 
 // Convenience wrapper for the common "mask any address inside a free-form message" case.
-internal fun maskEmailsInText(text: String?): String? =
-    text?.replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) }
+internal fun maskEmailsInText(text: String?): String? = text?.replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) }
 
 // Matches any email-like token in a freeform string — used to mask PII in error messages
 // before they reach Spring Application Events / audit logs. Pattern kept in sync with EMAIL_REGEX.

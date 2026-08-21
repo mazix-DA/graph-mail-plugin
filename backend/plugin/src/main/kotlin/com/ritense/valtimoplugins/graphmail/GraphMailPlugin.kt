@@ -13,6 +13,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.context.ApplicationEventPublisher
 import java.io.ByteArrayOutputStream
 
+// Prefix for the per-activity pass counter the duplicate guard keys on. Namespaced so it cannot
+// collide with process data, and prefixed rather than a single variable so two send-email tasks in
+// one process count independently.
+internal const val PASS_COUNTER_VARIABLE_PREFIX = "graphMailPass_"
+
+// Used when a delegate is invoked without activity context (custom harnesses, non-standard
+// invocation paths). Keeps the key well-formed instead of embedding "null".
+private const val NO_ACTIVITY_ID = "unknown-activity"
+
 private const val MAX_RECIPIENTS_PER_FIELD = 100
 private const val MAX_RECIPIENTS_TOTAL = 200
 private const val MAX_SUBJECT_LENGTH = 255
@@ -24,17 +33,22 @@ private const val MAX_BODY_CONTENT_BYTES = 5 * 1_048_576
 // inline `style` attributes for layout. <style> blocks are excluded: CSS url()/@import
 // can trigger external requests (GDPR tracking pixels) and load malicious stylesheets.
 // data: URIs excluded from img src: SVG+script payload, SEG/DLP bypass. Use cid: or https:.
-private val EMAIL_HTML_SAFELIST: Safelist = Safelist.relaxed()
-    .addTags("center", "hr")
-    .addAttributes(":all", "style", "class", "id", "title", "align", "bgcolor", "valign")
-    .addAttributes("table", "border", "cellpadding", "cellspacing", "width")
-    .addAttributes("td", "colspan", "rowspan", "width")
-    .addAttributes("th", "colspan", "rowspan", "width")
-    .addAttributes("img", "width", "height")
-    .addProtocols("a", "href", "http", "https", "mailto", "tel")
-    .addProtocols("img", "src", "http", "https", "cid")
+private val EMAIL_HTML_SAFELIST: Safelist =
+    Safelist
+        .relaxed()
+        .addTags("center", "hr")
+        .addAttributes(":all", "style", "class", "id", "title", "align", "bgcolor", "valign")
+        .addAttributes("table", "border", "cellpadding", "cellspacing", "width")
+        .addAttributes("td", "colspan", "rowspan", "width")
+        .addAttributes("th", "colspan", "rowspan", "width")
+        .addAttributes("img", "width", "height")
+        .addProtocols("a", "href", "http", "https", "mailto", "tel")
+        .addProtocols("img", "src", "http", "https", "cid")
 
-private val EMAIL_OUTPUT_SETTINGS = org.jsoup.nodes.Document.OutputSettings().prettyPrint(false)
+private val EMAIL_OUTPUT_SETTINGS =
+    org.jsoup.nodes.Document
+        .OutputSettings()
+        .prettyPrint(false)
 
 // jsoup's Safelist filters attribute *names*, not their values, so allowing `style` above lets
 // through exactly the constructs the <style>-block exclusion exists to prevent: url() fetches an
@@ -81,15 +95,25 @@ internal fun parseStringListParam(value: String?): List<String> {
     if (value.isNullOrBlank()) return emptyList()
     val trimmed = value.trim()
     if (trimmed.startsWith("[")) {
-        return trimmed.removePrefix("[").removeSuffix("]")
+        return trimmed
+            .removePrefix("[")
+            .removeSuffix("]")
             .split(",")
-            .map { it.trim().removeSurrounding("\"").removeSurrounding("'").trim() }
-            .filter { it.isNotBlank() }
+            .map {
+                it
+                    .trim()
+                    .removeSurrounding("\"")
+                    .removeSurrounding("'")
+                    .trim()
+            }.filter { it.isNotBlank() }
     }
     return trimmed.split(",").map { it.trim() }.filter { it.isNotBlank() }
 }
 
-private fun parseRecipients(values: List<String>, fieldName: String): List<GraphRecipient> {
+private fun parseRecipients(
+    values: List<String>,
+    fieldName: String,
+): List<GraphRecipient> {
     if (values.isEmpty()) return emptyList()
     require(values.size <= MAX_RECIPIENTS_PER_FIELD) {
         "Too many addresses in '$fieldName': ${values.size} (max $MAX_RECIPIENTS_PER_FIELD)"
@@ -359,24 +383,25 @@ class GraphMailPlugin(
     // BpmnError degrades into a "no catching boundary event found" incident whose message is less
     // useful than the one thrown here. Routing these through a boundary error event is a process
     // design decision, not something this plugin should impose — see documentation/plugin.md.
-    private fun retryVerdictOf(ex: Throwable): String = when (ex) {
-        is IllegalArgumentException, is IllegalStateException ->
-            "PERMANENT_INPUT — retrying will fail identically; correct the process data or the plugin configuration"
-        // Before GraphMailPermanentException: this one is thrown for a 401 that survived a forced
-        // token refresh, which is the single most common "grant the permission" case there is, and
-        // it does not extend GraphMailPermanentException — so without its own branch it fell all
-        // the way through to UNCLASSIFIED.
-        is GraphMailTokenExpiredException ->
-            "PERMANENT_REMOTE — the token was rejected even after a refresh; grant Mail.Send as an " +
-                "application permission and give it admin consent"
-        is GraphMailPermanentException ->
-            "PERMANENT_REMOTE — Graph rejected this permanently; a configuration or permission change is required"
-        is GraphMailUnknownOutcomeException ->
-            "UNKNOWN — the message MAY have been sent; verify the mailbox before re-running this activity"
-        is GraphMailRetryableException ->
-            "TRANSIENT — safe to retry; the job executor will reschedule"
-        else -> "UNCLASSIFIED"
-    }
+    private fun retryVerdictOf(ex: Throwable): String =
+        when (ex) {
+            is IllegalArgumentException, is IllegalStateException ->
+                "PERMANENT_INPUT — retrying will fail identically; correct the process data or the plugin configuration"
+            // Before GraphMailPermanentException: this one is thrown for a 401 that survived a forced
+            // token refresh, which is the single most common "grant the permission" case there is, and
+            // it does not extend GraphMailPermanentException — so without its own branch it fell all
+            // the way through to UNCLASSIFIED.
+            is GraphMailTokenExpiredException ->
+                "PERMANENT_REMOTE — the token was rejected even after a refresh; grant Mail.Send as an " +
+                    "application permission and give it admin consent"
+            is GraphMailPermanentException ->
+                "PERMANENT_REMOTE — Graph rejected this permanently; a configuration or permission change is required"
+            is GraphMailUnknownOutcomeException ->
+                "UNKNOWN — the message MAY have been sent; verify the mailbox before re-running this activity"
+            is GraphMailRetryableException ->
+                "TRANSIENT — safe to retry; the job executor will reschedule"
+            else -> "UNCLASSIFIED"
+        }
 
     // Identifies one *attempt at one activity instance*, which is exactly the granularity the
     // duplicate guard needs: stable across a job-executor retry of the same activity instance
@@ -387,21 +412,36 @@ class GraphMailPlugin(
     // The previous key, "${execution.id}:${execution.currentActivityId}", was NOT that: a flow
     // that loops back to the same service task reuses both values, so every iteration after the
     // first was silently suppressed as a duplicate for the lifetime of the guard's TTL.
+    // Identifies one *pass* over one activity, which is exactly the granularity the duplicate guard
+    // needs: the same value when the job executor retries a rolled-back attempt, a different value
+    // on every fresh pass of a loop or multi-instance marker.
+    //
+    // Getting here took two wrong answers, both verified against a real engine in
+    // ActivityInstanceIdContractTest:
+    //
+    //   execution.id + currentActivityId  stable across a retry, but IDENTICAL across loop
+    //                                     iterations — every mail after the first was dropped
+    //   activityInstanceId                unique per iteration, but CHANGES on every retry
+    //                                     (send-email:9 -> :15 -> :20) — a rolled-back send was
+    //                                     re-sent, which is the very thing the guard exists to stop
+    //
+    // Those three fields cannot separate the two situations: in both, execution.id and
+    // currentActivityId are equal while activityInstanceId differs. Nothing derived from them
+    // works, and neither does a content hash — a dunning process that legitimately sends the same
+    // message twice would be silenced.
+    //
+    // What does work is a value that shares the transaction's fate. This counter is read before it
+    // is advanced and written through the execution, so a rollback takes the increment with it and
+    // the retry reads the same number, while a committed pass leaves the next one a higher number.
+    // The cost is a variable on the process instance, visible in Cockpit and in variable history.
     private fun idempotencyKeyFor(execution: DelegateExecution): String {
-        val activityInstanceId = execution.activityInstanceId
-        if (!activityInstanceId.isNullOrBlank()) {
-            return "${execution.processInstanceId}:$activityInstanceId"
-        }
-        // Defensive fallback for delegates invoked without activity-instance context (custom
-        // test harnesses, non-standard invocation paths). Coarser: it cannot tell a legitimate
-        // second pass over the same activity apart from a retry of the first one.
-        logger.warn(
-            "No activityInstanceId available for execution [{}] — falling back to the " +
-                "execution+activity key; duplicate suppression is coarser in this mode and a " +
-                "loop over the same service task may be suppressed",
-            execution.id,
-        )
-        return "${execution.id}:${execution.currentActivityId}"
+        val activityId = execution.currentActivityId ?: NO_ACTIVITY_ID
+        val counterVariable = "$PASS_COUNTER_VARIABLE_PREFIX$activityId"
+
+        val passesSoFar = (execution.getVariable(counterVariable) as? Int) ?: 0
+        execution.setVariable(counterVariable, passesSoFar + 1)
+
+        return "${execution.id}:$activityId:$passesSoFar"
     }
 
     // Empty when the property is missing (pre-allowlist configurations) — callers treat
@@ -437,29 +477,35 @@ class GraphMailPlugin(
             val fileName = metadata["fileName"] as? String ?: resourceId
             val contentType = metadata["contentType"] as? String ?: "application/octet-stream"
 
-            val raw = resourceStorageService.getResourceContentAsInputStream(resourceId)
-                ?: throw GraphMailException("Attachment '$resourceId' not found in temporary storage")
+            val raw =
+                resourceStorageService.getResourceContentAsInputStream(resourceId)
+                    ?: throw GraphMailException("Attachment '$resourceId' not found in temporary storage")
 
             // Read with a hard cap so a single oversized blob doesn't blow up the heap.
             val rawBytes = raw.use { it.readNBytesCapped(MAX_SINGLE_ATTACHMENT_BYTES + 1L) }
             require(rawBytes.size <= MAX_SINGLE_ATTACHMENT_BYTES) {
                 "Attachment '$fileName' exceeds ${MAX_SINGLE_ATTACHMENT_BYTES / (1024 * 1024)} MB " +
-                "(${rawBytes.size} bytes)."
+                    "(${rawBytes.size} bytes)."
             }
             totalBytes += rawBytes.size
             require(totalBytes <= MAX_TOTAL_ATTACHMENT_BYTES) {
                 "Total attachment size exceeds ${MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)} MB ($totalBytes bytes)."
             }
 
-            logger.debug("Attachment resolved: name='{}', type='{}', size={}",
-                fileName, contentType, rawBytes.size)
+            logger.debug(
+                "Attachment resolved: name='{}', type='{}', size={}",
+                fileName,
+                contentType,
+                rawBytes.size,
+            )
             ResolvedAttachment(name = fileName, contentType = contentType, rawBytes = rawBytes)
         }
     }
 
     private fun resolveBodyContent(contentId: String): String {
-        val stream = resourceStorageService.getResourceContentAsInputStream(contentId)
-            ?: throw GraphMailException("Body content '$contentId' not found in temporary storage")
+        val stream =
+            resourceStorageService.getResourceContentAsInputStream(contentId)
+                ?: throw GraphMailException("Body content '$contentId' not found in temporary storage")
         val bytes = stream.use { it.readNBytesCapped(MAX_BODY_CONTENT_BYTES + 1L) }
         require(bytes.size <= MAX_BODY_CONTENT_BYTES) {
             "Body content '$contentId' exceeds maximum allowed size of $MAX_BODY_CONTENT_BYTES bytes"

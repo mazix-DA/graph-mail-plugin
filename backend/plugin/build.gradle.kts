@@ -78,6 +78,9 @@ dependencies {
     testImplementation("org.postgresql:postgresql")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
+    // ActivityInstanceIdContractTest runs a real Operaton engine in-process on H2 to verify the
+    // assumption the duplicate guard is built on. No Postgres, no docker, no Spring.
+    testImplementation("com.h2database:h2")
 }
 
 apply(from = "gradle/publishing.gradle")

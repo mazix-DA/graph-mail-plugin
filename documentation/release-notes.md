@@ -2,43 +2,48 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
-## 1.0.5
-
-**Wijzigen van de afzender-whitelist vereist voortaan het client secret**
-
-De `allowedSenders`-whitelist bepaalt namens welke mailboxen de tenant-brede `Mail.Send`-machtiging
-via deze plugin gebruikt mag worden. Een adres toevoegen is daarmee een rechtenuitbreiding, maar was
-tot nu toe te doen met niets meer dan toegang tot het beheerscherm: Valtimo vult bij een update een
-leeg secretveld aan met de opgeslagen waarde, dus de credential hoefde nooit op tafel te komen.
-
-Vanaf deze versie is een gewijzigde whitelist alleen op te slaan wanneer het `clientSecret` opnieuw
-wordt meegegeven. Ongewijzigd laten verandert niets aan de bestaande werkwijze. Herordenen,
-respatiëren of andere hoofdlettergebruik van dezelfde adressen telt niet als wijziging; een entry
-verwijderen wél.
-
-- Afgedwongen in de backend (`AllowedSendersChangeGuard`), niet alleen in het formulier — een directe
-  `PUT` op de configuratie-API krijgt een `400`. De controle moest een aspect worden rond
-  `PluginService.updatePluginConfiguration`: dat is het laatste punt waarop nog zichtbaar is óf het
-  secret is meegestuurd. Daarna heeft Valtimo het lege veld al aangevuld, waardoor zelfs een
-  `@PluginEvent(UPDATE)` — die wél vóór het opslaan draait — het verschil niet meer kan zien.
-- In het configuratiescherm blokkeert het formulier het opslaan met een gerichte melding bij het
-  secretveld, zodat de beheerder het meteen ziet in plaats van pas bij de foutmelding.
-- Uit te schakelen met `graph-mail.require-secret-for-allowlist-change: false`.
-- De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden,
-  bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigt. Een aspect dat stil
-  niet meer matcht zou de bescherming geruisloos laten verdwijnen terwijl documentatie en release
-  notes hem blijven beloven; dat faalgedrag is expliciet luid gemaakt. De controle inspecteert
-  daarvoor de advisor-keten van de proxy zelf, verifieert dat de pointcut elke
-  `updatePluginConfiguration`-variant raakt, en eist dat elke variant een configuratie-id én de
-  ingediende properties draagt — anders zou een variant die de controle niet kan uitlezen wél
-  geadviseerd worden maar de wijziging ongecontroleerd doorlaten.
-
 ## 1.0.4
 
-Vervolg op een diepgaande review van de plugin, aangevuld met de bevindingen van een
-geautomatiseerde review-ronde daarop. Bevat verscheidene correctheidsfixes met direct effect op
-verzonden e-mail, meerdere security-hardenings (waaronder één met een migratiestap), en de eerste
-echte performance-ingreep.
+Vervolg op een diepgaande review van de plugin, aangevuld met de bevindingen van meerdere
+geautomatiseerde review-rondes daarop. Bevat verscheidene correctheidsfixes met direct effect op
+verzonden e-mail, meerdere security-hardenings (waaronder één met een migratiestap), en twee
+ingrepen die de plugin geschikt maken voor productielast.
+
+**De duplicaat-guard werkte niet — nu wel, en nu ook bewezen**
+
+De guard voorkomt dat een e-mail twee keer uitgaat wanneer de Operaton-transactie na een geslaagde
+verzending alsnog terugrolt en de activity opnieuw wordt uitgevoerd. Tijdens deze ronde bleek de
+sleutel waarop hij herkende in geen van beide eerdere vormen te werken. Beide zijn nu tegen een
+draaiende engine getest (`ActivityInstanceIdContractTest`) in plaats van tegen een mock:
+
+| Sleutel | Stabiel over retry? | Uniek per loop-iteratie? |
+|---------|--------------------|--------------------------|
+| `execution.id` + `currentActivityId` | ja | **nee** — elke volgende mail in een loop verdween |
+| `activityInstanceId` | **nee** — nieuw nummer per poging | ja |
+| teller in procesvariabele | ja | ja |
+
+De sleutel is nu een teller per activity die de plugin als procesvariabele bijhoudt
+(`graphMailPass_<activityId>`). Die deelt het lot van de transactie: rolt die terug, dan rolt de
+ophoging mee en leest de retry hetzelfde nummer. De drie velden hierboven kunnen de twee situaties
+principieel niet scheiden — bij zowel een retry als een loop-iteratie zijn `execution.id` en
+`currentActivityId` gelijk en verschilt `activityInstanceId`.
+
+> **Let op:** de plugin schrijft hiermee een variabele op elke procesinstantie die mail verstuurt,
+> zichtbaar in Cockpit en in de variabelenhistorie. Genamespaced en per activity, zodat twee
+> send-email-taken in één proces onafhankelijk tellen.
+
+**Retry-backoff houdt de job-executor niet langer bezet**
+
+Wachten tussen pogingen gebeurt nu binnen een budget van 2 seconden per aanroep. Daarna geeft de
+plugin de thread op en meldt de fout als *transient*, zodat de engine het later opnieuw inplant.
+
+Eerder werd een `Retry-After` van 15 seconden tot vijf keer achtereen uitgezeten. Graph throttlet
+mail per mailbox stevig, dus lagen bij throttling alle job-executor threads tegelijk te slapen en
+verwerkte de engine géén enkele job meer — ook niets dat met e-mail te maken had. Korte haperingen
+worden nog wel in de aanroep opgevangen; één backoff van 500 ms uitzitten is goedkoper dan een job
+herplannen.
+
+> Configureer een `failedJobRetryTimeCycle` op de send-email service task, bijvoorbeeld `R5/PT2M`.
 
 **Breaking — pluginproperties verplaatst naar applicatieconfiguratie**
 `tokenBaseUrl`, `graphBaseUrl`, `connectTimeoutSeconds` en `readTimeoutSeconds` zijn geen
@@ -123,6 +128,35 @@ worden nu bij opstarten gevalideerd tegen een vaste allowlist van Microsoft-endp
 - Elke mislukte verzending logt een `verdict` (`PERMANENT_INPUT`, `PERMANENT_REMOTE`, `UNKNOWN`,
   `TRANSIENT`) plus een concrete remedie per HTTP-status, zodat een beheerder in de GZAC-logs kan
   zien of hij moet wachten of iets moet aanpassen.
+
+**Wijzigen van de afzender-whitelist vereist voortaan het client secret**
+
+De `allowedSenders`-whitelist bepaalt namens welke mailboxen de tenant-brede `Mail.Send`-machtiging
+via deze plugin gebruikt mag worden. Een adres toevoegen is daarmee een rechtenuitbreiding, maar was
+tot nu toe te doen met niets meer dan toegang tot het beheerscherm: Valtimo vult bij een update een
+leeg secretveld aan met de opgeslagen waarde, dus de credential hoefde nooit op tafel te komen.
+
+Vanaf deze versie is een gewijzigde whitelist alleen op te slaan wanneer het `clientSecret` opnieuw
+wordt meegegeven. Ongewijzigd laten verandert niets aan de bestaande werkwijze. Herordenen,
+respatiëren of andere hoofdlettergebruik van dezelfde adressen telt niet als wijziging; een entry
+verwijderen wél.
+
+- Afgedwongen in de backend (`AllowedSendersChangeGuard`), niet alleen in het formulier — een directe
+  `PUT` op de configuratie-API krijgt een `400`. De controle moest een aspect worden rond
+  `PluginService.updatePluginConfiguration`: dat is het laatste punt waarop nog zichtbaar is óf het
+  secret is meegestuurd. Daarna heeft Valtimo het lege veld al aangevuld, waardoor zelfs een
+  `@PluginEvent(UPDATE)` — die wél vóór het opslaan draait — het verschil niet meer kan zien.
+- In het configuratiescherm blokkeert het formulier het opslaan met een gerichte melding bij het
+  secretveld, zodat de beheerder het meteen ziet in plaats van pas bij de foutmelding.
+- Uit te schakelen met `graph-mail.require-secret-for-allowlist-change: false`.
+- De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden,
+  bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigt. Een aspect dat stil
+  niet meer matcht zou de bescherming geruisloos laten verdwijnen terwijl documentatie en release
+  notes hem blijven beloven; dat faalgedrag is expliciet luid gemaakt. De controle inspecteert
+  daarvoor de advisor-keten van de proxy zelf, verifieert dat de pointcut elke
+  `updatePluginConfiguration`-variant raakt, en eist dat elke variant een configuratie-id én de
+  ingediende properties draagt — anders zou een variant die de controle niet kan uitlezen wél
+  geadviseerd worden maar de wijziging ongecontroleerd doorlaten.
 
 ## 1.0.3
 

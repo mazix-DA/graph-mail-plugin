@@ -31,9 +31,14 @@ private const val DEFAULT_MAX_CACHED_TOKENS = 64
  *   locking and retries if it lost that race, so two callers can never end up holding two
  *   different Lock instances for the same key.
  */
-class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKENS) {
-
-    private data class CachedToken(val token: String, val expiresAt: Instant, val createdAt: Instant) {
+class GraphTokenCache(
+    private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKENS,
+) {
+    private data class CachedToken(
+        val token: String,
+        val expiresAt: Instant,
+        val createdAt: Instant,
+    ) {
         // Same reasoning as GraphCredentials.toString() in GraphMailModels.kt — this holds a
         // live bearer token; never let a default toString() print it in a log line or assertion.
         override fun toString(): String = "CachedToken(token=***, expiresAt=$expiresAt, createdAt=$createdAt)"
@@ -46,15 +51,17 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
     // evictStaleLocksIfNeeded.
     private val locksSizeAtLastEviction = AtomicInteger(0)
 
-    private fun freshToken(key: String): String? =
-        tokens[key]?.takeIf { Instant.now().isBefore(it.expiresAt) }?.token
+    private fun freshToken(key: String): String? = tokens[key]?.takeIf { Instant.now().isBefore(it.expiresAt) }?.token
 
     /**
      * Returns the cached token for [key] if still valid, otherwise calls [fetch] to obtain a
      * new (token, expiresAt) pair, caches it, and returns the token. Concurrent callers for
      * the same [key] serialise on a per-key lock so only one of them actually calls [fetch].
      */
-    fun getOrFetch(key: String, fetch: () -> Pair<String, Instant>): String {
+    fun getOrFetch(
+        key: String,
+        fetch: () -> Pair<String, Instant>,
+    ): String {
         freshToken(key)?.let { return it }
         val lock = lockFor(key)
         try {
@@ -87,7 +94,10 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
      * refused token can come back either way — from a sibling's fetch or from our own. The caller's
      * one-refresh limit is what bounds that case, and it is unaffected here.
      */
-    fun forceFetch(key: String, fetch: () -> Pair<String, Instant>): String {
+    fun forceFetch(
+        key: String,
+        fetch: () -> Pair<String, Instant>,
+    ): String {
         val enteredAt = Instant.now()
         val lock = lockFor(key)
         try {
@@ -112,7 +122,10 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
      * already refreshed in the meantime, forcing an unnecessary extra Azure round-trip for every
      * caller of that key.
      */
-    fun invalidateIfMatches(key: String, staleToken: String): Boolean {
+    fun invalidateIfMatches(
+        key: String,
+        staleToken: String,
+    ): Boolean {
         var removed = false
         tokens.computeIfPresent(key) { _, cached ->
             if (cached.token == staleToken) {
@@ -191,6 +204,9 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
         tokens.entries.removeIf { !now.isBefore(it.value.expiresAt) }
         if (tokens.size < maxCachedTokens) return
         // Still full: evict the oldest entry by createdAt — bounded scan, only runs at capacity.
-        tokens.entries.minByOrNull { it.value.createdAt }?.key?.let { tokens.remove(it) }
+        tokens.entries
+            .minByOrNull { it.value.createdAt }
+            ?.key
+            ?.let { tokens.remove(it) }
     }
 }
