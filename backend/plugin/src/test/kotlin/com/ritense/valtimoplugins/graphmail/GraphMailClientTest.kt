@@ -725,6 +725,58 @@ class GraphMailClientTest {
         wireMock.verify(1, putRequestedFor(urlPathMatching(".*/upload/chunk-400")))
     }
 
+    @Test fun `a rewinding nextExpectedRanges is followed instead of skipping ahead`() {
+        // Graph reporting an earlier range means it did NOT commit what we just sent. Advancing to
+        // end + 1 anyway would leave a hole in the attachment, so the reported offset wins even
+        // when it points backwards.
+        stubToken()
+        stubDraftCreate()
+        val uploadUrl = "${wireMock.baseUrl()}/upload/rewind"
+        stubUploadSession(uploadUrl)
+        wireMock.stubFor(put(urlPathMatching(".*/upload/rewind")).inScenario("rewind")
+            .whenScenarioStateIs("Started")
+            .willReturn(okJson("""{"nextExpectedRanges":["0-"]}"""))
+            .willSetStateTo("committed"))
+        wireMock.stubFor(put(urlPathMatching(".*/upload/rewind")).inScenario("rewind")
+            .whenScenarioStateIs("committed")
+            .willReturn(aResponse().withStatus(200)))
+        stubSendDraft()
+
+        sendLarge()
+
+        // Both PUTs must start at byte 0 — the second is a genuine re-send of the declined range,
+        // not a jump past it.
+        wireMock.verify(2, putRequestedFor(urlPathMatching(".*/upload/rewind"))
+            .withHeader("Content-Range", containing("bytes 0-")))
+    }
+
+    @Test fun `an upload that never advances fails as retryable instead of looping forever`() {
+        stubToken()
+        stubDraftCreate()
+        val uploadUrl = "${wireMock.baseUrl()}/upload/stalled"
+        stubUploadSession(uploadUrl)
+        wireMock.stubFor(put(urlPathMatching(".*/upload/stalled"))
+            .willReturn(okJson("""{"nextExpectedRanges":["0-"]}""")))
+
+        val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        assertTrue(ex is GraphMailRetryableException, "expected retryable, got ${ex::class.simpleName}")
+        assertTrue(ex.message!!.contains("no progress"))
+    }
+
+    @Test fun `an out-of-range nextExpectedRanges offset aborts the upload`() {
+        stubToken()
+        stubDraftCreate()
+        val uploadUrl = "${wireMock.baseUrl()}/upload/bogus"
+        stubUploadSession(uploadUrl)
+        wireMock.stubFor(put(urlPathMatching(".*/upload/bogus"))
+            .willReturn(okJson("""{"nextExpectedRanges":["999999999-"]}""")))
+
+        val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        assertTrue(ex.message!!.contains("out-of-range"))
+    }
+
     @Test fun `upload URL on a foreign host is rejected before any content is sent`() {
         stubToken()
         stubDraftCreate()

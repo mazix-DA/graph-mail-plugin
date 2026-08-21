@@ -33,6 +33,10 @@ private const val MAX_SEND_WALL_CLOCK_MS = 30_000L
 private const val MAX_DRAFT_SEND_WALL_CLOCK_MS = 120_000L
 private const val CHUNK_MAX_RETRIES = 3
 
+// How many consecutive server responses may decline to advance the upload before giving up.
+// Graph is allowed to ask us to go back and re-send a range; it is not allowed to do so forever.
+private const val MAX_UPLOAD_STALLS = 3
+
 // 4xx statuses that no amount of retrying will change: they need a configuration, permission or
 // input fix first. Everything else in the 4xx range is treated as possibly transient so the job
 // executor keeps its normal retry behaviour.
@@ -662,6 +666,7 @@ class GraphMailClientImpl(
         val bytes = attachment.rawBytes
         val total = bytes.size.toLong()
         var offset = 0L
+        var stalls = 0
 
         while (offset < total) {
             if (System.currentTimeMillis() > deadline)
@@ -742,8 +747,35 @@ class GraphMailClientImpl(
                     if (delay > 0) Thread.sleep(delay)
                 }
             }
-            // Guard against a server-reported range that would stall or rewind the loop forever.
-            offset = if (nextOffset > offset) nextOffset else end + 1
+            // Graph's reported range is authoritative, including when it points *backwards*: that
+            // means it did not commit the range we just sent, and continuing from end + 1 would
+            // leave a hole in the attachment. So follow it wherever it goes, and bound how often it
+            // may decline to advance instead — a rewind is legitimate, an endless rewind is not.
+            if (nextOffset !in 0..total) {
+                throw GraphMailRetryableException(
+                    "Graph reported an out-of-range nextExpectedRanges offset ($nextOffset) for " +
+                        "'${attachment.name}' of $total bytes — aborting rather than uploading a " +
+                        "corrupt attachment",
+                )
+            }
+            if (nextOffset > offset) {
+                stalls = 0
+            } else {
+                stalls++
+                if (stalls > MAX_UPLOAD_STALLS) {
+                    throw GraphMailRetryableException(
+                        "Attachment upload of '${attachment.name}' made no progress: Graph asked to " +
+                            "resume at offset $nextOffset $MAX_UPLOAD_STALLS times in a row while " +
+                            "uploading from offset $offset of $total",
+                    )
+                }
+                logger.warn(
+                    "Graph asked to resume the upload of '{}' at offset {} instead of advancing " +
+                        "past {} — re-sending from there ({}/{})",
+                    attachment.name, nextOffset, end, stalls, MAX_UPLOAD_STALLS,
+                )
+            }
+            offset = nextOffset
         }
     }
 
