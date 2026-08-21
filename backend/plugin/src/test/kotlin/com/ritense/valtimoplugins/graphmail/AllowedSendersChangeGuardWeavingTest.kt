@@ -1,6 +1,7 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.ritense.plugin.domain.PluginConfigurationId
 import com.ritense.plugin.service.PluginService
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -49,17 +50,27 @@ class AllowedSendersChangeGuardWeavingTest {
         )
     }
 
-    @Test fun `at least one matched overload actually carries the submitted properties`() {
-        // A match is worthless if the advice cannot read the submitted ObjectNode: that is the only
-        // place where "was the secret supplied" is still answerable.
-        val carriesProperties =
+    @Test fun `every matched overload carries what the advice needs to read`() {
+        // "At least one" would be the same mistake the startup check used to make: a matched
+        // overload the advice cannot read still gets advised, still hits the permissive escape
+        // branch, and still persists an allowlist change unchecked. The ObjectNode is the only
+        // place where "was the secret supplied" is answerable, and the id is what identifies the
+        // configuration to compare against.
+        val unreadable =
             updateMethods
                 .filter { pointcut.matches(it, PluginService::class.java) }
-                .any { method ->
-                    method.parameterTypes.any { ObjectNode::class.java.isAssignableFrom(it) }
+                .filterNot { method ->
+                    method.parameterTypes.any { ObjectNode::class.java.isAssignableFrom(it) } &&
+                        method.parameterTypes.any {
+                            PluginConfigurationId::class.java.isAssignableFrom(it)
+                        }
                 }
 
-        assertTrue(carriesProperties, "no matched overload takes an ObjectNode of submitted properties")
+        assertTrue(
+            unreadable.isEmpty(),
+            "the pointcut matches ${unreadable.map { it.toGenericString() }}, which the advice " +
+                "cannot inspect — updates through those would bypass the allowlist check",
+        )
     }
 
     @Test fun `the pointcut does not match unrelated PluginService methods`() {

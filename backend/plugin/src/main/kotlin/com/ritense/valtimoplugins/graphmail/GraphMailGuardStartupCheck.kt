@@ -1,6 +1,7 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.ritense.plugin.domain.PluginConfigurationId
 import com.ritense.plugin.service.PluginService
 import org.slf4j.LoggerFactory
 import org.springframework.aop.Advisor
@@ -44,12 +45,29 @@ class GraphMailGuardStartupCheck(
     @EventListener(ApplicationReadyEvent::class)
     fun verifyAllowedSendersGuardIsActive() {
         val target = AopUtils.getTargetClass(pluginService)
-        val updateMethods = target.methods.filter(::isUpdateWithProperties)
+
+        // Every overload of the name, not only the ones the guard understands. The pointcut matches
+        // by name, so an overload the advice cannot read is still advised — and takes its
+        // proceed() escape branch, passing an allowlist change through unchecked. Filtering to
+        // "the ones carrying an ObjectNode" here would mean the check silently ignores exactly the
+        // overload that creates the hole.
+        val updateMethods = target.methods.filter { it.name == "updatePluginConfiguration" }
 
         if (updateMethods.isEmpty()) {
             fail(
-                "${target.name} has no updatePluginConfiguration method taking an ObjectNode. " +
+                "${target.name} has no updatePluginConfiguration method at all. " +
                     "The Valtimo API this guard depends on has changed.",
+            )
+        }
+
+        val uninspectable = updateMethods.filterNot(::isInspectableByGuard)
+        if (uninspectable.isNotEmpty()) {
+            fail(
+                "the guard cannot read the arguments of " +
+                    "${uninspectable.joinToString { it.toGenericString() }}. It needs both a " +
+                    "PluginConfigurationId and an ObjectNode of submitted properties to decide " +
+                    "whether the allowlist changed and whether the secret was supplied; without " +
+                    "them the advice waves the update through.",
             )
         }
 
@@ -87,8 +105,10 @@ class GraphMailGuardStartupCheck(
         )
     }
 
-    private fun isUpdateWithProperties(method: Method): Boolean =
-        method.name == "updatePluginConfiguration" &&
+    // The advice reads the configuration id and the submitted properties out of the join point's
+    // arguments. An overload missing either is one it cannot evaluate.
+    private fun isInspectableByGuard(method: Method): Boolean =
+        method.parameterTypes.any { PluginConfigurationId::class.java.isAssignableFrom(it) } &&
             method.parameterTypes.any { ObjectNode::class.java.isAssignableFrom(it) }
 
     private fun belongsToGuard(advisor: Advisor): Boolean {

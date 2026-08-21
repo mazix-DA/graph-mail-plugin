@@ -146,6 +146,17 @@ class AllowedSendersChangeGuardTest {
         }
     }
 
+    @Test fun `the bracketed list form is the same list as the comma-separated one`() {
+        // parseStringListParam accepts the JSON-array form, so the guard must treat it as equal —
+        // and the frontend normaliser mirrors this, or the two disagree about what changed.
+        stubStored(storedConfiguration("""["noreply@test.nl","@test.nl"]"""))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,@test.nl"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
+    }
+
     @Test fun `another plugin's configuration is never touched`() {
         // The pointcut matches every plugin's update; the guard must apply to this plugin only.
         stubStored(storedConfiguration("anything", pluginKey = "some-other-plugin"))
