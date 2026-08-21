@@ -27,7 +27,11 @@ verwijderen wél.
 - De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden,
   bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigt. Een aspect dat stil
   niet meer matcht zou de bescherming geruisloos laten verdwijnen terwijl documentatie en release
-  notes hem blijven beloven; dat faalgedrag is expliciet luid gemaakt.
+  notes hem blijven beloven; dat faalgedrag is expliciet luid gemaakt. De controle inspecteert
+  daarvoor de advisor-keten van de proxy zelf, verifieert dat de pointcut elke
+  `updatePluginConfiguration`-variant raakt, en eist dat elke variant een configuratie-id én de
+  ingediende properties draagt — anders zou een variant die de controle niet kan uitlezen wél
+  geadviseerd worden maar de wijziging ongecontroleerd doorlaten.
 
 ## 1.0.4
 

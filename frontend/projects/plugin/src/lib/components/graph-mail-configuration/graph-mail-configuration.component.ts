@@ -214,13 +214,26 @@ export class GraphMailPluginConfigurationComponent
   // in AllowedSendersChangeGuard, so the two cannot disagree about what counts as "changed".
   // Reordering or respacing the same addresses is not a change.
   private allowlistChanged(current: string | undefined): boolean {
-    const normalise = (value: string | null | undefined): string =>
-      (value ?? '')
-        .split(',')
-        .map(entry => entry.trim().toLowerCase())
-        .filter(entry => !!entry)
+    // Mirrors parseStringListParam in GraphMailPlugin.kt, which the backend guard uses: the
+    // bracketed JSON-array form is accepted there, so `["a@x.nl"]` and `a@x.nl` are the same list.
+    // Deduplicated and sorted because the guard compares as a Set. Any divergence here means the
+    // form and the backend disagree about whether the list changed.
+    const normalise = (value: string | null | undefined): string => {
+      const raw = (value ?? '').trim();
+      const entries = raw.startsWith('[')
+        ? raw
+            .replace(/^\[/, '')
+            .replace(/]$/, '')
+            .split(',')
+            .map(entry => entry.trim().replace(/^["']|["']$/g, '').trim())
+        : raw.split(',').map(entry => entry.trim());
+
+      return Array.from(
+        new Set(entries.map(entry => entry.toLowerCase()).filter(entry => !!entry)),
+      )
         .sort()
         .join(',');
+    };
 
     return normalise(current) !== normalise(this.originalAllowedSenders);
   }

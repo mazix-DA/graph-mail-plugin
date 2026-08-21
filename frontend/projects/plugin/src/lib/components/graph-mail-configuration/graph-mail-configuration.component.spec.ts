@@ -108,6 +108,43 @@ describe('GraphMailPluginConfigurationComponent', () => {
     expect(validityOf(component)).toBeTrue();
   });
 
+  it('does not treat a repeated allowlist entry as a change', () => {
+    // Must agree with the backend, which compares as a Set. Disagreeing here means the form demands
+    // the secret for a list the backend would have accepted unchanged.
+    existingConfigWithAllowlist('noreply@gemeente.nl');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: 'noreply@gemeente.nl,noreply@gemeente.nl',
+    });
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
+  it('does not treat trailing or repeated separators as a change', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl,@gemeente.nl');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: 'noreply@gemeente.nl,,@gemeente.nl,',
+    });
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
+  it('treats the bracketed list form as the same list as the comma-separated one', () => {
+    // The backend's parseStringListParam accepts the JSON-array form. A stored value in that shape
+    // must not make every subsequent edit look like a change.
+    existingConfigWithAllowlist('["noreply@gemeente.nl","@gemeente.nl"]');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: 'noreply@gemeente.nl,@gemeente.nl',
+    });
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
   it('blocks saving a changed allowlist while the secret is empty', () => {
     existingConfigWithAllowlist('noreply@gemeente.nl');
     component.formValueChange({

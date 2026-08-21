@@ -76,6 +76,26 @@ class AllowedSendersChangeGuardTest {
         verify(jp).proceed()
     }
 
+    @Test fun `a repeated entry is not a change`() {
+        // The frontend normaliser deduplicates for exactly this reason; if it did not, the form
+        // would demand a secret for a list the backend considers untouched.
+        stubStored(storedConfiguration("noreply@test.nl"))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,noreply@test.nl"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
+    }
+
+    @Test fun `trailing and repeated separators are not a change`() {
+        stubStored(storedConfiguration("noreply@test.nl,@test.nl"))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,,@test.nl,"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
+    }
+
     @Test fun `a changed allowlist without the secret is rejected`() {
         stubStored(storedConfiguration("noreply@test.nl"))
         val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,ceo@test.nl"))
@@ -124,6 +144,17 @@ class AllowedSendersChangeGuardTest {
         assertThrows(AllowedSendersChangeRequiresSecretException::class.java) {
             guard.requireSecretWhenAllowlistChanges(jp)
         }
+    }
+
+    @Test fun `the bracketed list form is the same list as the comma-separated one`() {
+        // parseStringListParam accepts the JSON-array form, so the guard must treat it as equal —
+        // and the frontend normaliser mirrors this, or the two disagree about what changed.
+        stubStored(storedConfiguration("""["noreply@test.nl","@test.nl"]"""))
+        val jp = joinPoint(configurationId, null, "title", properties("noreply@test.nl,@test.nl"))
+
+        guard.requireSecretWhenAllowlistChanges(jp)
+
+        verify(jp).proceed()
     }
 
     @Test fun `another plugin's configuration is never touched`() {
