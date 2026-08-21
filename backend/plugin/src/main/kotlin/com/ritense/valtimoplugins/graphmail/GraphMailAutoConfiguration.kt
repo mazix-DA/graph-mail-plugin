@@ -1,16 +1,19 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.ritense.plugin.repository.PluginConfigurationRepository
 import com.ritense.plugin.service.PluginService
 import com.ritense.resource.service.TemporaryResourceStorageService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.event.ApplicationReadyEvent
-import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.EnableAspectJAutoProxy
 import org.springframework.context.event.EventListener
 import org.springframework.core.annotation.Order
 import org.springframework.http.client.JdkClientHttpRequestFactory
@@ -24,6 +27,7 @@ import java.time.Duration
 // written inside a KDoc block comment would open an inner comment that is never closed and
 // swallows the rest of the file. Keeping all doc text in line comments avoids that trap.
 @AutoConfiguration
+@EnableAspectJAutoProxy
 @EnableConfigurationProperties(GraphMailHttpProperties::class)
 class GraphMailAutoConfiguration {
 
@@ -85,6 +89,38 @@ class GraphMailAutoConfiguration {
             }
             .build()
     }
+
+    // Requires the client secret to be re-entered whenever the sender allowlist changes — the
+    // allowlist bounds which mailboxes Mail.Send may be used for, so widening it is a privilege
+    // escalation. See the class doc for why this has to be an aspect and not a plugin event.
+    //
+    // Guarded by a property so an operator can switch it off deliberately if it ever blocks them,
+    // rather than being tempted to patch it out. Off is a real reduction in protection, so it has
+    // to be an explicit, visible choice.
+    @Bean
+    @ConditionalOnProperty(
+        prefix = "graph-mail",
+        name = ["require-secret-for-allowlist-change"],
+        havingValue = "true",
+        matchIfMissing = true,
+    )
+    @ConditionalOnMissingBean(AllowedSendersChangeGuard::class)
+    fun allowedSendersChangeGuard(
+        pluginConfigurationRepository: PluginConfigurationRepository,
+    ): AllowedSendersChangeGuard = AllowedSendersChangeGuard(pluginConfigurationRepository)
+
+    // Deliberately tied to the same condition as the guard: when the guard is on, its absence must
+    // fail startup; when an operator has switched it off, there is nothing to verify.
+    @Bean
+    @ConditionalOnProperty(
+        prefix = "graph-mail",
+        name = ["require-secret-for-allowlist-change"],
+        havingValue = "true",
+        matchIfMissing = true,
+    )
+    @ConditionalOnMissingBean(GraphMailGuardStartupCheck::class)
+    fun graphMailGuardStartupCheck(pluginService: PluginService): GraphMailGuardStartupCheck =
+        GraphMailGuardStartupCheck(pluginService)
 
     // Single shared instance — see GraphTokenCache's class doc for why the cache must be a
     // bean rather than something each GraphMailClientImpl owns: Valtimo hydrates a fresh

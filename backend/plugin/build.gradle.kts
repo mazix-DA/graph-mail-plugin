@@ -43,6 +43,14 @@ dependencies {
     compileOnly("io.github.oshai:kotlin-logging:$kotlinLoggingVersion")
     compileOnly("com.ritense.valtimo:temporary-resource-storage")
     compileOnly("org.springframework.boot:spring-boot-starter-security")
+    // AllowedSendersChangeGuard is an @Aspect that reads the stored configuration through
+    // PluginConfigurationRepository, which extends JpaRepository. compileOnly like the rest of the
+    // Spring/Valtimo dependencies here — the host application supplies these at runtime.
+    //
+    // The repository rather than PluginService on purpose: the aspect advises PluginService, so
+    // injecting it would create a circular dependency between an advisor and its own target.
+    compileOnly("org.springframework.boot:spring-boot-starter-aop")
+    compileOnly("org.springframework.boot:spring-boot-starter-data-jpa")
     // 1.23.1 fixes CVE-2026-71497 (Cleaner XSS bypass via a malformed tag name ending in a
     // control character, for custom Safelists that permit raw-text elements). Our
     // EMAIL_HTML_SAFELIST in GraphMailPlugin.kt does not add any raw-text elements, so this
@@ -62,6 +70,7 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-web")
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa")
     testImplementation("org.springframework.boot:spring-boot-starter-security")
+    testImplementation("org.springframework.boot:spring-boot-starter-aop")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.security:spring-security-test")
     testImplementation("org.mockito:mockito-core")

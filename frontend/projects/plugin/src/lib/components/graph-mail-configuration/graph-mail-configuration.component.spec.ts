@@ -75,6 +75,94 @@ describe('GraphMailPluginConfigurationComponent', () => {
     expect(component.tenantIdInvalid).toBeFalse();
   });
 
+  // ── Changing the sender allowlist requires the client secret ───────────────────────────
+  // The allowlist bounds which mailboxes this plugin may send as, so widening it is a privilege
+  // escalation. The backend enforces the same rule in AllowedSendersChangeGuard; these specs cover
+  // the immediate feedback in the form.
+
+  // Emitted validity is what actually gates the save button.
+  const validityOf = (comp: GraphMailPluginConfigurationComponent): boolean =>
+    (comp as any).valid$.getValue();
+
+  const existingConfigWithAllowlist = (allowlist: string): void => {
+    component.savedConfigurationId = '33333333-3333-3333-3333-333333333333';
+    (component as any).originalAllowedSenders = allowlist;
+  };
+
+  it('keeps an existing configuration saveable without the secret when nothing changed', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl');
+    component.formValueChange({...baseFormValue, allowedSenders: 'noreply@gemeente.nl'});
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
+  it('does not treat reordering or respacing the allowlist as a change', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl, @gemeente.nl');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: '@GEMEENTE.NL,  noreply@Gemeente.nl ',
+    });
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
+  it('blocks saving a changed allowlist while the secret is empty', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: 'noreply@gemeente.nl,ceo@gemeente.nl',
+    });
+
+    expect(component.secretRequiredForAllowlistChange).toBeTrue();
+    expect(validityOf(component)).toBeFalse();
+  });
+
+  it('allows saving a changed allowlist once the secret is re-entered', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl');
+    component.formValueChange({
+      ...baseFormValue,
+      allowedSenders: 'noreply@gemeente.nl,ceo@gemeente.nl',
+    });
+    expect(validityOf(component)).toBeFalse();
+
+    component.clientSecretValue = 's3cret';
+    component.onSecretChange();
+
+    expect(component.secretRequiredForAllowlistChange).toBeFalse();
+    expect(validityOf(component)).toBeTrue();
+  });
+
+  it('treats removing an allowlist entry as a change too', () => {
+    existingConfigWithAllowlist('noreply@gemeente.nl,ceo@gemeente.nl');
+    component.formValueChange({...baseFormValue, allowedSenders: 'noreply@gemeente.nl'});
+
+    expect(component.secretRequiredForAllowlistChange).toBeTrue();
+    expect(validityOf(component)).toBeFalse();
+  });
+
+  it('captures the stored allowlist from the prefill so a change can be detected', () => {
+    component.prefillConfiguration$ = of({
+      ...baseFormValue,
+      id: 'ccc',
+      allowedSenders: 'noreply@gemeente.nl',
+    } as any);
+    component.save$ = of();
+    httpSpy.get.and.returnValue(of([]));
+
+    component.ngOnInit();
+
+    expect((component as any).originalAllowedSenders).toBe('noreply@gemeente.nl');
+  });
+
+  it('still requires the secret for a brand new configuration', () => {
+    component.savedConfigurationId = null;
+    component.formValueChange({...baseFormValue, allowedSenders: 'noreply@gemeente.nl'});
+
+    expect(validityOf(component)).toBeFalse();
+  });
+
   // ── canSendTest: the ambiguous-configuration guard ─────────────────────────────────────
   // Regression coverage for the fix where an unresolved configuration match used to fall back
   // to "the first configuration for this plugin" — silently testing with the wrong credentials.

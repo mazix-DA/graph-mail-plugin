@@ -2,6 +2,33 @@
 
 Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
+## 1.0.5
+
+**Wijzigen van de afzender-whitelist vereist voortaan het client secret**
+
+De `allowedSenders`-whitelist bepaalt namens welke mailboxen de tenant-brede `Mail.Send`-machtiging
+via deze plugin gebruikt mag worden. Een adres toevoegen is daarmee een rechtenuitbreiding, maar was
+tot nu toe te doen met niets meer dan toegang tot het beheerscherm: Valtimo vult bij een update een
+leeg secretveld aan met de opgeslagen waarde, dus de credential hoefde nooit op tafel te komen.
+
+Vanaf deze versie is een gewijzigde whitelist alleen op te slaan wanneer het `clientSecret` opnieuw
+wordt meegegeven. Ongewijzigd laten verandert niets aan de bestaande werkwijze. Herordenen,
+respatiëren of andere hoofdlettergebruik van dezelfde adressen telt niet als wijziging; een entry
+verwijderen wél.
+
+- Afgedwongen in de backend (`AllowedSendersChangeGuard`), niet alleen in het formulier — een directe
+  `PUT` op de configuratie-API krijgt een `400`. De controle moest een aspect worden rond
+  `PluginService.updatePluginConfiguration`: dat is het laatste punt waarop nog zichtbaar is óf het
+  secret is meegestuurd. Daarna heeft Valtimo het lege veld al aangevuld, waardoor zelfs een
+  `@PluginEvent(UPDATE)` — die wél vóór het opslaan draait — het verschil niet meer kan zien.
+- In het configuratiescherm blokkeert het formulier het opslaan met een gerichte melding bij het
+  secretveld, zodat de beheerder het meteen ziet in plaats van pas bij de foutmelding.
+- Uit te schakelen met `graph-mail.require-secret-for-allowlist-change: false`.
+- De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden,
+  bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigt. Een aspect dat stil
+  niet meer matcht zou de bescherming geruisloos laten verdwijnen terwijl documentatie en release
+  notes hem blijven beloven; dat faalgedrag is expliciet luid gemaakt.
+
 ## 1.0.4
 
 Vervolg op een diepgaande review van de plugin, aangevuld met de bevindingen van een
