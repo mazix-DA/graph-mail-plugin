@@ -69,6 +69,62 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
         }
     }
 
+    /**
+     * Ignores any cached entry for [key] and unconditionally calls [fetch], caching and returning
+     * the result. Used by the 401 handler: after a token is rejected, re-reading the cache is not
+     * good enough — a concurrent caller that started its fetch *before* the invalidation can write
+     * the very same rejected token back, and the retry would then repeat with a token that is
+     * already known to be refused.
+     *
+     * Concurrent refreshers for the same key collapse into a single Azure call: a caller that had
+     * to wait for the lock accepts a token that was cached *after* it started waiting, since such a
+     * token cannot be the one it set out to replace. Only the first caller through actually
+     * refetches. Without that check, a broad token rotation would turn every in-flight send into
+     * its own token request.
+     *
+     * This does not weaken the guarantee the 401 handler relies on. Entra may hand back the same
+     * token string for repeated client-credentials requests inside its validity window, so a
+     * refused token can come back either way — from a sibling's fetch or from our own. The caller's
+     * one-refresh limit is what bounds that case, and it is unaffected here.
+     */
+    fun forceFetch(key: String, fetch: () -> Pair<String, Instant>): String {
+        val enteredAt = Instant.now()
+        val lock = lockFor(key)
+        try {
+            tokens[key]
+                ?.takeIf { it.createdAt.isAfter(enteredAt) && Instant.now().isBefore(it.expiresAt) }
+                ?.let { return it.token }
+            val (token, expiresAt) = fetch()
+            evictIfFull()
+            tokens[key] = CachedToken(token, expiresAt, Instant.now())
+            return token
+        } finally {
+            lock.unlock()
+            evictStaleLocksIfNeeded(key)
+        }
+    }
+
+    /**
+     * Removes the entry for [key] only while it still holds [staleToken]. Returns true when the
+     * entry was actually removed.
+     *
+     * Invalidating by key alone would let a 401 handler throw away a token that another thread has
+     * already refreshed in the meantime, forcing an unnecessary extra Azure round-trip for every
+     * caller of that key.
+     */
+    fun invalidateIfMatches(key: String, staleToken: String): Boolean {
+        var removed = false
+        tokens.computeIfPresent(key) { _, cached ->
+            if (cached.token == staleToken) {
+                removed = true
+                null
+            } else {
+                cached
+            }
+        }
+        return removed
+    }
+
     /** Removes every entry whose key starts with [prefix]. Returns the number of entries cleared. */
     fun invalidateByPrefix(prefix: String): Int {
         val matching = tokens.keys.filter { it.startsWith(prefix) }
@@ -128,7 +184,13 @@ class GraphTokenCache(private val maxCachedTokens: Int = DEFAULT_MAX_CACHED_TOKE
 
     private fun evictIfFull() {
         if (tokens.size < maxCachedTokens) return
-        // Evict the oldest entry by createdAt — bounded scan, only runs at capacity.
+        val now = Instant.now()
+        // Expired entries are free to drop and are never coming back into use — clear those before
+        // touching anything still valid. Nothing else sweeps them: freshToken() only filters them
+        // out on read, so without this they sit at capacity and push out live tokens.
+        tokens.entries.removeIf { !now.isBefore(it.value.expiresAt) }
+        if (tokens.size < maxCachedTokens) return
+        // Still full: evict the oldest entry by createdAt — bounded scan, only runs at capacity.
         tokens.entries.minByOrNull { it.value.createdAt }?.key?.let { tokens.remove(it) }
     }
 }

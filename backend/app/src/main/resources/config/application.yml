@@ -68,6 +68,14 @@ server:
     mime-types: text/html,text/xml,text/plain,text/css, application/javascript, application/json
     min-response-size: 1024
 
+graph-mail:
+  http:
+    # Defaults staan al op de Microsoft-endpoints; expliciet vermeld zodat zichtbaar is waar
+    # deze instellingen leven sinds ze geen pluginproperties meer zijn.
+    token-base-url: https://login.microsoftonline.com
+    graph-base-url: https://graph.microsoft.com
+    attachment-concurrency: 8
+
 valtimo:
   database: postgres
   app:
@@ -143,8 +151,13 @@ operaton:
         deploy-changed-only: true
         enforceHistoryTimeToLive: false
     job-executor:
+      # Zie documentation/plugin.md — de Graph Mail plugin blokkeert job-executor threads tijdens
+      # retry-backoff, dus deze pool moet ruim staan.
       core-pool-size: 20
       max-pool-size: 50
+      # Klein gehouden: bij een thread-pool-executor worden threads bóven core-pool-size pas
+      # aangemaakt wanneer de wachtrij vol is, dus een grote queue maakt max-pool-size betekenisloos.
+      queue-size: 10
 
 implementation:
   suwinet:

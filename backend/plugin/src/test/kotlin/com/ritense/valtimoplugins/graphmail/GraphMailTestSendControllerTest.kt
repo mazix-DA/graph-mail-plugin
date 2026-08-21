@@ -248,14 +248,44 @@ class GraphMailTestSendControllerTest {
 
     // ── Error mapping ──────────────────────────────────────────────────────────────
 
-    @Test fun `maps GraphMailTokenExpiredException to 401`() {
+    @Test fun `maps GraphMailTokenExpiredException to HTTP 502 with Graph status 401 in the body`() {
         stubPlugin()
         stubSendMail().thenThrow(GraphMailTokenExpiredException("token expired"))
         val response = send()
-        assertEquals(HttpStatus.UNAUTHORIZED, response.statusCode)
+        // Upstream 401 is surfaced as 502: Graph refused OUR token, the admin's session is fine.
+        assertEquals(HttpStatus.BAD_GATEWAY, response.statusCode)
         assertFalse(response.body!!.success)
         assertEquals(401, response.body!!.statusCode)
         assertTrue(response.body!!.message.contains("Client Secret"))
+    }
+
+    @Test fun `a generic upstream 401 also becomes HTTP 502`() {
+        // Not only the typed token exception: any Graph 401 must stay off the wire as a 401, or the
+        // frontend's auth interceptor reads it as an expired admin session and logs the user out.
+        stubPlugin()
+        stubSendMail().thenThrow(GraphMailException("unauthorized", statusCode = 401))
+
+        val response = send()
+
+        assertEquals(HttpStatus.BAD_GATEWAY, response.statusCode)
+        assertEquals(401, response.body!!.statusCode)
+    }
+
+    @Test fun `an exception message containing an address is masked in the response`() {
+        // RestClientException embeds the request URI, and the sender mailbox sits in that path.
+        stubPlugin()
+        stubSendMail().thenThrow(
+            GraphMailException(
+                """I/O error on POST request for "https://graph.microsoft.com/v1.0/users/geheim@gemeente.nl/sendMail"""",
+                statusCode = 500,
+            )
+        )
+
+        val response = send()
+
+        val message = response.body!!.message
+        assertFalse(message.contains("geheim@gemeente.nl"), "raw address leaked to the admin UI: $message")
+        assertTrue(message.contains("g***@gemeente.nl"), "expected a masked address, got: $message")
     }
 
     @Test fun `maps 403 GraphMailException to Mail Send permission message`() {

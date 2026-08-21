@@ -67,6 +67,10 @@ internal fun maskEmail(address: String): String {
 
 internal fun maskEmails(addresses: Collection<String>): String = addresses.joinToString(", ") { maskEmail(it) }
 
+// Convenience wrapper for the common "mask any address inside a free-form message" case.
+internal fun maskEmailsInText(text: String?): String? =
+    text?.replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) }
+
 // Matches any email-like token in a freeform string — used to mask PII in error messages
 // before they reach Spring Application Events / audit logs. Pattern kept in sync with EMAIL_REGEX.
 internal val EMAIL_IN_TEXT_REGEX =

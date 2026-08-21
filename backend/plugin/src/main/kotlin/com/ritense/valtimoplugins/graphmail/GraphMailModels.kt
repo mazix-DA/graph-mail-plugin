@@ -1,5 +1,6 @@
 package com.ritense.valtimoplugins.graphmail
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 
@@ -127,6 +128,13 @@ data class UploadAttachmentItem(
     @JsonProperty("name") val name: String,
     @JsonProperty("size") val size: Long,
     @JsonProperty("contentType") val contentType: String,
+)
+
+// Returned by each chunk PUT while an upload is still in progress. The final chunk returns the
+// created attachment instead, with no nextExpectedRanges — hence the nullable field.
+@JsonIgnoreProperties(ignoreUnknown = true)
+internal data class UploadChunkResponse(
+    @JsonProperty("nextExpectedRanges") val nextExpectedRanges: List<String>? = null,
 )
 
 internal data class UploadSessionResponse(
