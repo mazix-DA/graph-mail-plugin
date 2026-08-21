@@ -56,6 +56,16 @@ De plugin hanteert **deny-by-default**: elke verzending wordt geweigerd tenzij h
 
 > **Migratie:** pluginconfiguraties die vóór de introductie van `allowedSenders` zijn aangemaakt, weigeren na de upgrade elke verzending totdat de whitelist eenmalig is ingevuld en opgeslagen.
 
+**Wijzigen vereist het client secret**
+
+De whitelist bepaalt namens welke mailboxen de tenant-brede `Mail.Send`-machtiging via deze plugin gebruikt mag worden. Een adres toevoegen is daarmee feitelijk een rechtenuitbreiding: wie dat doet, kan vanaf dat moment als die mailbox mailen. Daarom is een gewijzigde whitelist alleen op te slaan wanneer het `clientSecret` in diezelfde request opnieuw wordt meegegeven — beheerschermtoegang alleen is niet genoeg, je moet de credential ook daadwerkelijk bezitten.
+
+Blijft de whitelist ongewijzigd, dan verandert er niets: het secretveld mag leeg blijven en Valtimo behoudt de opgeslagen waarde. Herordenen of anders spatiëren van dezelfde adressen telt niet als wijziging; hoofdletters evenmin. Verwijderen telt wél als wijziging — versmallen is op zichzelf geen escalatie, maar zo kan "verwijderen en opnieuw toevoegen" geen omweg worden.
+
+Dit wordt server-side afgedwongen (`AllowedSendersChangeGuard`), dus ook een directe `PUT /api/v1/plugin/configuration/{id}` die de frontend omzeilt krijgt een `400`. De controle grijpt in vóórdat Valtimo een leeg secretveld aanvult met de opgeslagen waarde — daarna is niet meer vast te stellen óf het secret is meegegeven.
+
+> **Uitschakelen:** kan met `graph-mail.require-secret-for-allowlist-change: false`. Dat is een reële verzwakking en daarom een expliciete, zichtbare keuze. De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden (bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigde) — een beveiligingscontrole die stilletjes wegvalt is erger dan een die nooit beloofd is.
+
 ## Actie: send-email
 
 Verstuur een e-mail vanuit een BPMN-serviceTask.

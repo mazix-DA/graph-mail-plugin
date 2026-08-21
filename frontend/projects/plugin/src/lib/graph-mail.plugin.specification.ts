@@ -26,6 +26,9 @@ const graphMailPluginSpecification: PluginSpecification = {
       tenantIdInvalidFormat: 'Tenant ID moet een geldig UUID zijn (bijv. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).',
       clientIdInvalidFormat: 'Client ID moet een geldig UUID zijn (bijv. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).',
       clientSecretPlaceholder: '(ongewijzigd laten als leeg)',
+      allowedSendersChangeRequiresSecret:
+        'Je wijzigt de lijst met toegestane afzenders. Die lijst bepaalt namens welke mailboxen ' +
+        'deze plugin mag versturen, dus vul het client secret opnieuw in om de wijziging op te slaan.',
       testMailTitle: 'Testmail versturen',
       testMailDescription: 'Verstuur een testmail met voorbeelddata (Pietje van Patje) om te valideren of de credentials werken en e-mail kan worden verstuurd via Microsoft Graph.',
       testMailSaveFirst: 'Sla de configuratie eerst op voordat je een testmail verstuurt.',
@@ -65,6 +68,9 @@ const graphMailPluginSpecification: PluginSpecification = {
       tenantIdInvalidFormat: 'Tenant ID must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).',
       clientIdInvalidFormat: 'Client ID must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).',
       clientSecretPlaceholder: '(leave blank to keep unchanged)',
+      allowedSendersChangeRequiresSecret:
+        'You are changing the list of allowed senders. That list controls which mailboxes this ' +
+        'plugin may send as, so enter the client secret again to save the change.',
       testMailTitle: 'Send test email',
       testMailDescription: 'Send a test email with sample data (John Doe) to validate that the credentials work and email can be sent via Microsoft Graph.',
       testMailSaveFirst: 'Save the configuration first before sending a test email.',

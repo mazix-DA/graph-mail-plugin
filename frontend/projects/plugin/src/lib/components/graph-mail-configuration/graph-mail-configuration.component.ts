@@ -59,6 +59,14 @@ export class GraphMailPluginConfigurationComponent
   // True when the form has enough data to show the test section.
   testSectionVisible = false;
 
+  // The allowlist as it was when the configuration was loaded, so a change can be detected.
+  // Null for new configurations (nothing stored yet).
+  private originalAllowedSenders: string | null = null;
+
+  // True when the allowlist has been changed on an existing configuration and the secret has not
+  // been re-entered. Drives the message next to the secret field.
+  secretRequiredForAllowlistChange = false;
+
   // Inline validation flags
   tenantIdInvalid = false;
   clientIdInvalid = false;
@@ -110,6 +118,7 @@ export class GraphMailPluginConfigurationComponent
         .pipe(filter(config => !!config), take(1))
         .subscribe((config: any) => {
           this.testSenderMailbox = config?.testSenderMailbox ?? '';
+          this.originalAllowedSenders = config?.allowedSenders ?? null;
         });
 
       // Resolve the saved configuration UUID for the test-send endpoint.
@@ -201,6 +210,21 @@ export class GraphMailPluginConfigurationComponent
     );
   }
 
+  // Compared as a set of trimmed, lowercased entries — the same normalisation the backend applies
+  // in AllowedSendersChangeGuard, so the two cannot disagree about what counts as "changed".
+  // Reordering or respacing the same addresses is not a change.
+  private allowlistChanged(current: string | undefined): boolean {
+    const normalise = (value: string | null | undefined): string =>
+      (value ?? '')
+        .split(',')
+        .map(entry => entry.trim().toLowerCase())
+        .filter(entry => !!entry)
+        .sort()
+        .join(',');
+
+    return normalise(current) !== normalise(this.originalAllowedSenders);
+  }
+
   // Called when the password input changes so validity re-evaluates without a v-form event.
   onSecretChange(): void {
     const formValue = this.formValue$.getValue();
@@ -211,7 +235,19 @@ export class GraphMailPluginConfigurationComponent
     // When editing an existing configuration the backend never returns the secret,
     // so an empty field means "unchanged" — the form is still valid without it.
     const isNewConfiguration = !this.savedConfigurationId;
-    const secretValid = isNewConfiguration ? !!this.clientSecretValue : true;
+
+    // ...except when the sender allowlist is being changed. That list bounds which mailboxes this
+    // plugin may send as, so widening it is a privilege escalation and should be provable by
+    // whoever holds the credential — not merely by whoever has the admin screen open. The backend
+    // enforces the same rule (AllowedSendersChangeGuard); this is the immediate feedback.
+    this.secretRequiredForAllowlistChange =
+      !isNewConfiguration &&
+      this.allowlistChanged(formValue.allowedSenders) &&
+      !this.clientSecretValue;
+
+    const secretValid = isNewConfiguration
+      ? !!this.clientSecretValue
+      : !this.secretRequiredForAllowlistChange;
 
     const valid = !!(
       formValue.configurationTitle &&
