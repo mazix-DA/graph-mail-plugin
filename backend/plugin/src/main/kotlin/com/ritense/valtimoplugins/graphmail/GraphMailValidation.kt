@@ -18,8 +18,7 @@ internal fun isValidResourceId(value: String): Boolean {
     return true
 }
 
-internal fun isValidEmail(value: String) =
-    value.length <= 254 && !value.contains("..") && EMAIL_REGEX.matches(value)
+internal fun isValidEmail(value: String) = value.length <= 254 && !value.contains("..") && EMAIL_REGEX.matches(value)
 
 // Sender allowlist check (deny-by-default). An entry is either a full address
 // ("noreply@example.com") or a domain entry starting with '@' ("@example.com").
@@ -44,10 +43,12 @@ internal fun isSenderAllowed(sender: String, allowlist: List<String>): Boolean {
 // Header injection guard: any CR or LF inside a header-bearing field is rejected.
 // Defense-in-depth — the Graph API JSON encodes them anyway, but the same fields are
 // echoed in logs and could feed downstream systems with weaker handling.
-internal fun containsControlChars(value: String?): Boolean =
-    value != null && value.any { it == '\r' || it == '\n' }
+internal fun containsControlChars(value: String?): Boolean = value != null && value.any { it == '\r' || it == '\n' }
 
-internal fun requireNoControlChars(value: String?, fieldName: String) {
+internal fun requireNoControlChars(
+    value: String?,
+    fieldName: String,
+) {
     require(!containsControlChars(value)) {
         "Field '$fieldName' must not contain CR or LF characters"
     }
@@ -64,14 +65,13 @@ internal fun maskEmail(address: String): String {
     return "$first***$domain"
 }
 
-internal fun maskEmails(addresses: Collection<String>): String =
-    addresses.joinToString(", ") { maskEmail(it) }
+internal fun maskEmails(addresses: Collection<String>): String = addresses.joinToString(", ") { maskEmail(it) }
 
-// Matches any email-like token in a freeform string — used to mask PII in error messages
-// before they reach Spring Application Events / audit logs. Pattern kept in sync with EMAIL_REGEX.
 // Convenience wrapper for the common "mask any address inside a free-form message" case.
 internal fun maskEmailsInText(text: String?): String? =
     text?.replace(EMAIL_IN_TEXT_REGEX) { maskEmail(it.value) }
 
+// Matches any email-like token in a freeform string — used to mask PII in error messages
+// before they reach Spring Application Events / audit logs. Pattern kept in sync with EMAIL_REGEX.
 internal val EMAIL_IN_TEXT_REGEX =
     Regex("[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9][a-zA-Z0-9.\\-]*\\.[a-zA-Z]{2,}")

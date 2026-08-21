@@ -7,4 +7,3 @@ Valtimo plugin voor het versturen van e-mail via de Microsoft Graph API met OAut
 - [Getting Started](documentation/getting-started.md) — installatie en buildinstructies
 - [Plugin Documentatie](documentation/plugin.md) — pluginconfiguratie, acties en aandachtspunten
 - [Release notes](documentation/release-notes.md) — versiegeschiedenis en wijzigingen
-
