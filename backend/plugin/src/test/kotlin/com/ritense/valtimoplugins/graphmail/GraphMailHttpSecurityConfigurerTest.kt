@@ -35,7 +35,6 @@ private class GraphMailHttpSecurityConfigurerTestApplication
 @WebMvcTest(controllers = [GraphMailTestSendController::class])
 @Import(GraphMailHttpSecurityConfigurerTest.TestSecurityConfig::class)
 class GraphMailHttpSecurityConfigurerTest {
-
     @Autowired
     private lateinit var mockMvc: MockMvc
 
@@ -49,41 +48,44 @@ class GraphMailHttpSecurityConfigurerTest {
     private lateinit var eventPublisher: ApplicationEventPublisher
 
     @Test fun `rejects test-send for a user without ROLE_ADMIN`() {
-        mockMvc.post("/api/v1/plugin/entra/test-send") {
-            contentType = MediaType.APPLICATION_JSON
-            content = TEST_SEND_BODY
-            with(user("bob").authorities(SimpleGrantedAuthority("ROLE_USER")))
-            with(csrf())
-        }.andExpect {
-            status { isForbidden() }
-        }
+        mockMvc
+            .post("/api/v1/plugin/entra/test-send") {
+                contentType = MediaType.APPLICATION_JSON
+                content = TEST_SEND_BODY
+                with(user("bob").authorities(SimpleGrantedAuthority("ROLE_USER")))
+                with(csrf())
+            }.andExpect {
+                status { isForbidden() }
+            }
     }
 
     @Test fun `lets an admin user through the security gate`() {
         // pluginService is unmocked for this id, so createInstance returns null and the
         // controller replies 404 — proving the request passed the security filter and
         // reached the controller, which is what this test is verifying.
-        mockMvc.post("/api/v1/plugin/entra/test-send") {
-            contentType = MediaType.APPLICATION_JSON
-            content = TEST_SEND_BODY
-            with(user("admin").authorities(SimpleGrantedAuthority("ROLE_ADMIN")))
-            with(csrf())
-        }.andExpect {
-            status { isNotFound() }
-        }
+        mockMvc
+            .post("/api/v1/plugin/entra/test-send") {
+                contentType = MediaType.APPLICATION_JSON
+                content = TEST_SEND_BODY
+                with(user("admin").authorities(SimpleGrantedAuthority("ROLE_ADMIN")))
+                with(csrf())
+            }.andExpect {
+                status { isNotFound() }
+            }
     }
 
     @Test fun `rejects test-send for an unauthenticated request`() {
         // No AuthenticationEntryPoint configured on this minimal test chain, so an
         // unauthenticated request is denied as 403 rather than a 401 challenge — either way,
         // the request never reaches the controller.
-        mockMvc.post("/api/v1/plugin/entra/test-send") {
-            contentType = MediaType.APPLICATION_JSON
-            content = TEST_SEND_BODY
-            with(csrf())
-        }.andExpect {
-            status { isForbidden() }
-        }
+        mockMvc
+            .post("/api/v1/plugin/entra/test-send") {
+                contentType = MediaType.APPLICATION_JSON
+                content = TEST_SEND_BODY
+                with(csrf())
+            }.andExpect {
+                status { isForbidden() }
+            }
     }
 
     // Minimal SecurityFilterChain wiring GraphMailHttpSecurityConfigurer the same way

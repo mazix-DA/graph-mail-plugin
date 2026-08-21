@@ -95,7 +95,19 @@ Bijlagen van 2 MiB of kleiner worden inline (base64) meegestuurd in de sendMail-
 **Dubbele verzending bij transactieretry**
 De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie na een geslaagde verzending alsnog terugdraait (bijvoorbeeld door een optimistic lock op andere procesdata) en de activiteit opnieuw uitvoert, is de e-mail bij Graph al onomkeerbaar geaccepteerd. De plugin herkent deze herhaling zelf en slaat de tweede Graph-aanroep over; je hoeft hier in het procesmodel niets voor in te richten.
 
-De herkenning gebeurt op de *activity-instantie*: stabiel over een job-executor retry van dezelfde poging, maar uniek per iteratie van een loop of multi-instance. Dat laatste is essentieel — een sleutel op execution-id plus activity-id lijkt equivalent, maar een flow die terugloopt naar dezelfde service task hergebruikt beide waarden, waardoor elke volgende iteratie stilzwijgend als duplicaat zou worden weggegooid.
+De herkenning gebeurt op een **teller per activity**, die de plugin als procesvariabele bijhoudt (`graphMailPass_<activityId>`). Die teller wordt gelezen vóórdat hij wordt opgehoogd en via de execution weggeschreven, dus hij deelt het lot van de transactie: rolt die terug, dan rolt de ophoging mee en leest de retry hetzelfde nummer; committeert een iteratie, dan begint de volgende bij een hoger nummer.
+
+> **Let op:** de plugin schrijft daarmee een variabele op elke procesinstantie die mail verstuurt. Die is zichtbaar in Cockpit en in de variabelenhistorie. De naam is genamespaced en per activity, zodat twee send-email-taken in één proces onafhankelijk tellen.
+
+Dat lijkt omslachtig, maar geen van de voor de hand liggende alternatieven werkt — beide zijn tegen een echte engine getest in `ActivityInstanceIdContractTest`:
+
+| Sleutel | Stabiel over retry? | Uniek per loop-iteratie? |
+|---------|--------------------|--------------------------|
+| `execution.id` + `currentActivityId` | ja | **nee** — elke volgende mail in een loop werd weggegooid |
+| `activityInstanceId` | **nee** — krijgt per poging een nieuw nummer | ja |
+| teller in procesvariabele | ja | ja |
+
+De eerste drie velden kunnen de twee situaties principieel niet scheiden: bij zowel een retry als een loop-iteratie is `execution.id` gelijk, `currentActivityId` gelijk en `activityInstanceId` verschillend. Een hash over de mailinhoud is evenmin bruikbaar: een aanmaningsproces dat bewust twee keer dezelfde mail stuurt zou dan stilzwijgend worden ingeslikt.
 
 > **Let op — een procesvariabele werkt hier níet als guard.** Die wordt geschreven binnen dezelfde transactie die terugrolt, dus hij verdwijnt samen met de retry en is voor de volgende poging nooit zichtbaar. Daarom gebruikt de plugin een bewust niet-transactionele, in-geheugen guard.
 
@@ -173,15 +185,23 @@ Het test-send endpoint staat maximaal 1 verzoek per gebruiker per 10 seconden to
 
 **Job executor thread-blokkering — verplichte configuratie**
 
-De retry-backoff gebruikt `Thread.sleep()`, waardoor de aanroepende Operaton job-executor thread geblokkeerd wordt tijdens het wachten op een nieuwe poging. Maximale blokkeerttijden per verzending:
+De retry-backoff gebruikt `Thread.sleep()`, maar **alleen binnen een wachtbudget van 2 seconden per aanroep**. Zodra een volgende wachtperiode dat budget zou overschrijden, geeft de plugin de thread op en meldt de fout als *transient*, zodat de job-executor het later opnieuw inplant zónder een thread vast te houden.
+
+Dat verschil is wezenlijk. Graph throttlet mail per mailbox stevig, en eerder honoreerde de plugin een `Retry-After` van 15 seconden vijf keer achter elkaar. Alle job-executor threads lagen dan tegelijk te slapen en de engine verwerkte géén enkele job meer — ook niets dat met e-mail te maken had. Eén externe API die de hele engine platlegt is een ernstiger storing dan een verzending die later slaagt.
+
+Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff van 500 ms uitzitten is goedkoper dan een job herplannen.
+
+> **Configureer daarom een `failedJobRetryTimeCycle`** op de send-email service task, bijvoorbeeld `R5/PT2M`. Zonder dat valt de plugin terug op de standaard retry-instelling van de engine, die voor throttling meestal te kort is.
+
+Resterende maximale blokkeerttijden per verzending:
 
 | Situatie | Maximale blokkeerttijd |
 |----------|----------------------|
-| Reguliere verzending (geen grote bijlagen) | 30 seconden |
+| Wachten op een nieuwe poging (backoff, `Retry-After`) | 2 seconden totaal per aanroep |
+| Reguliere verzending, inclusief netwerktijd | 30 seconden |
 | Verzending via upload-sessie (bijlage > 2 MiB) | 120 seconden |
-| 429 rate-limit sleep per poging (max) | 15 seconden |
 
-Als meerdere processen tegelijk e-mails versturen terwijl de Graph API rate-limiteert, kunnen alle job-executor threads tegelijkertijd geblokkeerd worden. Dit stopt de verwerking van alle andere Operaton-taken in de applicatie.
+De twee onderste grenzen zijn geen wachttijd maar werk: het overzetten van een bijlage van 25 MB duurt nu eenmaal. Alleen de bovenste was de bron van de engine-brede stilstand, en die is nu begrensd.
 
 **Minimum vereiste configuratie — voeg dit toe aan `application.yml`:**
 
