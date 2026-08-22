@@ -66,34 +66,43 @@ Dit wordt server-side afgedwongen (`AllowedSendersChangeGuard`), dus ook een dir
 
 > **Uitschakelen:** kan met `graph-mail.require-secret-for-allowlist-change: false`. Dat is een reële verzwakking en daarom een expliciete, zichtbare keuze. De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden (bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigde) — een beveiligingscontrole die stilletjes wegvalt is erger dan een die nooit beloofd is. De opstartcontrole loopt daarvoor de advisor-keten van de daadwerkelijke proxy na en eist dat de pointcut élke `updatePluginConfiguration`-variant raakt; dat de bean een AOP-proxy ís zegt niets, want die is door `@Transactional` sowieso al geproxied. Daarnaast moet elke variant *inspecteerbaar* zijn — een configuratie-id én een `ObjectNode` met de ingediende properties dragen. De pointcut matcht namelijk op naam, dus een variant die de controle niet kan uitlezen wordt wél geadviseerd maar laat de wijziging ongecontroleerd door; alleen de herkende varianten verifiëren zou die blinde vlek juist openhouden.
 
-**Hoe fijnmazig, naast een Application Access Policy?**
+**Hoe fijnmazig, naast een Exchange Online-scope?**
 
-De whitelist en de [Application Access Policy](#beperk-de-app-registration-tot-functionele-mailboxen-sterk-aanbevolen) beantwoorden **verschillende vragen**, op verschillende niveaus:
+Met "Exchange Online-scope" wordt hier bedoeld: de [beperking van de app registration tot specifieke mailboxen](#beperk-de-app-registration-tot-functionele-mailboxen-sterk-aanbevolen), via een Application Access Policy óf via RBAC for Applications (zie hierboven — RBAC heeft de voorkeur waar beschikbaar). Die scope en de whitelist beantwoorden **verschillende vragen**, op verschillende niveaus:
 
-| | Application Access Policy | `allowedSenders` |
+| | Exchange Online-scope | `allowedSenders` |
 |---|---|---|
 | Vraag | Welke mailboxen mag deze *app registration* überhaupt aanraken? | Als welke mailbox mag *deze pluginconfiguratie* verzenden? |
 | Bereik | Per app registration | Per pluginconfiguratie |
 | Beheerd door | Exchange Online-beheerder | Beheerder van de pluginconfiguratie |
 
-Die tweede vraag kan een Application Access Policy niet uitdrukken: twee pluginconfiguraties op dezelfde app registration zijn voor de policy identiek. Wil je één configuratie beperken tot `invordering@gemeente.nl` en een andere tot `noreply@gemeente.nl`, dan is de whitelist de enige plek waar dat kan.
+Die tweede vraag kan een Exchange Online-scope niet uitdrukken: twee pluginconfiguraties op dezelfde app registration zijn voor die scope identiek. Wil je één configuratie beperken tot `invordering@gemeente.nl` en een andere tot `noreply@gemeente.nl`, dan is de whitelist de enige plek waar dat kan.
 
 Aanbevolen granulariteit:
 
 | Situatie | `allowedSenders` |
 |----------|------------------|
-| Policy ingesteld én geverifieerd met `Test-ApplicationAccessPolicy` | Domein-entry, bijv. `@gemeente.nl` |
-| Geen policy, of niet te verifiëren vanuit jouw rol | Volledige adressen per mailbox |
+| Scope ingesteld én geverifieerd | Domein-entry, bijv. `@gemeente.nl` |
+| Geen scope, of niet te verifiëren vanuit jouw rol | Volledige adressen per mailbox |
 
-Bij de bovenste rij doet de policy de afbakening per mailbox en blijft de whitelist een dunne domeincontrole — er zijn dan géén twee mailboxlijsten die synchroon gehouden moeten worden.
+Verifiëren doe je per mechanisme met de bijbehorende Exchange Online-cmdlet, en altijd tégen een concrete mailbox — anders test je of de rol bestaat, niet of de grens werkt:
 
-Ook met een correct ingestelde policy blijft de whitelist zinvol:
+| Mechanisme | Verificatie |
+|---|---|
+| Application Access Policy | `Test-ApplicationAccessPolicy -AppId "<client-id>" -Identity "<mailbox>"` |
+| RBAC for Applications | `Test-ServicePrincipalAuthorization -Identity "<app>" -Resource "<mailbox>"` — zonder `-Resource` wordt de scope-controle niet uitgevoerd |
 
-- De policy is niet zichtbaar vanuit Valtimo. De whitelist is de enige plek waar de bedoelde reikwijdte vastligt voor wie de plugin beheert.
-- De policy-scope hangt aan een security group die door een ander team beheerd wordt en kan verschuiven zonder dat dat hier opvalt.
+> **Let op bij RBAC:** een Exchange-RBAC-toewijzing en een Entra-applicatiemachtiging zijn losse grants. Houdt dezelfde service principal daarnaast nog een ongescopete `Mail.Send`-applicatiemachtiging in Entra ID, dan kan die alsnog buiten de RBAC-scope verzenden. Controleer dus beide kanten voordat je de scope als sluitend beschouwt — en dat is precies waarom `allowedSenders` blijft staan.
+
+Bij de bovenste rij doet de Exchange Online-scope de afbakening per mailbox en blijft de whitelist een dunne domeincontrole — er zijn dan géén twee mailboxlijsten die synchroon gehouden moeten worden.
+
+Ook met een correct ingestelde scope blijft de whitelist zinvol:
+
+- De scope is niet zichtbaar vanuit Valtimo. De whitelist is de enige plek waar de bedoelde reikwijdte vastligt voor wie de plugin beheert.
+- De scope hangt aan een security group respectievelijk een management scope die door een ander team beheerd wordt, en kan verschuiven zonder dat dat hier opvalt.
 - Een afzender buiten de lijst wordt lokaal geweigerd vóór de tokenaanvraag, in plaats van als Graph-`403` midden in het proces — dat scheelt een incident en verbrande retries.
 
-> Dit maakt de Application Access Policy niet overbodig: die blijft de primaire controle, omdat hij ook beschermt wanneer het client secret buiten de plugin om wordt misbruikt. De whitelist kan dat niet.
+> Dit maakt de Exchange Online-scope niet overbodig: die blijft de primaire controle, omdat hij ook beschermt wanneer het client secret buiten de plugin om wordt misbruikt. De whitelist kan dat niet.
 
 
 ## Actie: send-email
