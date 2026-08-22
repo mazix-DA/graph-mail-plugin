@@ -82,8 +82,8 @@ Aanbevolen granulariteit:
 
 | Situatie | `allowedSenders` |
 |----------|------------------|
-| Scope ingesteld én geverifieerd | Domein-entry, bijv. `@gemeente.nl` |
-| Geen scope, of niet te verifiëren vanuit jouw rol | Volledige adressen per mailbox |
+| Scope ingesteld, geverifieerd én aantoonbaar sluitend (zie de waarschuwing hieronder) | Domein-entry, bijv. `@gemeente.nl` |
+| Geen scope, niet te verifiëren vanuit jouw rol, of twijfel of de scope sluitend is | Volledige adressen per mailbox |
 
 Verifiëren doe je per mechanisme met de bijbehorende Exchange Online-cmdlet, en altijd tégen een concrete mailbox — anders test je of de rol bestaat, niet of de grens werkt:
 
@@ -92,7 +92,11 @@ Verifiëren doe je per mechanisme met de bijbehorende Exchange Online-cmdlet, en
 | Application Access Policy | `Test-ApplicationAccessPolicy -AppId "<client-id>" -Identity "<mailbox>"` |
 | RBAC for Applications | `Test-ServicePrincipalAuthorization -Identity "<app>" -Resource "<mailbox>"` — zonder `-Resource` wordt de scope-controle niet uitgevoerd |
 
-> **Let op bij RBAC:** een Exchange-RBAC-toewijzing en een Entra-applicatiemachtiging zijn losse grants. Houdt dezelfde service principal daarnaast nog een ongescopete `Mail.Send`-applicatiemachtiging in Entra ID, dan kan die alsnog buiten de RBAC-scope verzenden. Controleer dus beide kanten voordat je de scope als sluitend beschouwt — en dat is precies waarom `allowedSenders` blijft staan.
+> **Let op bij RBAC — een scope alléén is niet sluitend.** Exchange-RBAC en Entra-applicatiemachtigingen zijn losse grants: RBAC-rollen werken volgens Microsoft *in aanvulling op* wat je in Entra ID toekent, niet als beperking daarop. Houdt dezelfde service principal daarnaast nog een tenantbrede `Mail.Send`-applicatiemachtiging in Entra ID, dan blijft die de verzending autoriseren buiten de RBAC-scope om.
+>
+> Dat is een stille valkuil: `Test-ServicePrincipalAuthorization` kan `InScope: False` melden voor een mailbox terwijl een Graph-`sendMail` naar diezelfde mailbox gewoon slaagt. De cmdlet toetst namelijk de RBAC-toewijzing, niet de Entra-machtiging die de aanroep alsnog toelaat.
+>
+> **Wil je op RBAC kunnen leunen, trek dan de tenantbrede `Mail.Send`-applicatiemachtiging in Entra ID in** en houd alleen de gescopete Exchange-rol over. Zolang die machtiging er nog staat, is `allowedSenders` de enige grens die daadwerkelijk actief is.
 
 Bij de bovenste rij doet de Exchange Online-scope de afbakening per mailbox en blijft de whitelist een dunne domeincontrole — er zijn dan géén twee mailboxlijsten die synchroon gehouden moeten worden.
 
