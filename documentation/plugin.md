@@ -66,6 +66,36 @@ Dit wordt server-side afgedwongen (`AllowedSendersChangeGuard`), dus ook een dir
 
 > **Uitschakelen:** kan met `graph-mail.require-secret-for-allowlist-change: false`. Dat is een reële verzwakking en daarom een expliciete, zichtbare keuze. De plugin weigert op te starten wanneer de controle aan staat maar niet toegepast kan worden (bijvoorbeeld doordat een Valtimo-upgrade de onderliggende signatuur wijzigde) — een beveiligingscontrole die stilletjes wegvalt is erger dan een die nooit beloofd is. De opstartcontrole loopt daarvoor de advisor-keten van de daadwerkelijke proxy na en eist dat de pointcut élke `updatePluginConfiguration`-variant raakt; dat de bean een AOP-proxy ís zegt niets, want die is door `@Transactional` sowieso al geproxied. Daarnaast moet elke variant *inspecteerbaar* zijn — een configuratie-id én een `ObjectNode` met de ingediende properties dragen. De pointcut matcht namelijk op naam, dus een variant die de controle niet kan uitlezen wordt wél geadviseerd maar laat de wijziging ongecontroleerd door; alleen de herkende varianten verifiëren zou die blinde vlek juist openhouden.
 
+**Hoe fijnmazig, naast een Application Access Policy?**
+
+De whitelist en de [Application Access Policy](#beperk-de-app-registration-tot-functionele-mailboxen-sterk-aanbevolen) beantwoorden **verschillende vragen**, op verschillende niveaus:
+
+| | Application Access Policy | `allowedSenders` |
+|---|---|---|
+| Vraag | Welke mailboxen mag deze *app registration* überhaupt aanraken? | Als welke mailbox mag *deze pluginconfiguratie* verzenden? |
+| Bereik | Per app registration | Per pluginconfiguratie |
+| Beheerd door | Exchange Online-beheerder | Beheerder van de pluginconfiguratie |
+
+Die tweede vraag kan een Application Access Policy niet uitdrukken: twee pluginconfiguraties op dezelfde app registration zijn voor de policy identiek. Wil je één configuratie beperken tot `invordering@gemeente.nl` en een andere tot `noreply@gemeente.nl`, dan is de whitelist de enige plek waar dat kan.
+
+Aanbevolen granulariteit:
+
+| Situatie | `allowedSenders` |
+|----------|------------------|
+| Policy ingesteld én geverifieerd met `Test-ApplicationAccessPolicy` | Domein-entry, bijv. `@gemeente.nl` |
+| Geen policy, of niet te verifiëren vanuit jouw rol | Volledige adressen per mailbox |
+
+Bij de bovenste rij doet de policy de afbakening per mailbox en blijft de whitelist een dunne domeincontrole — er zijn dan géén twee mailboxlijsten die synchroon gehouden moeten worden.
+
+Ook met een correct ingestelde policy blijft de whitelist zinvol:
+
+- De policy is niet zichtbaar vanuit Valtimo. De whitelist is de enige plek waar de bedoelde reikwijdte vastligt voor wie de plugin beheert.
+- De policy-scope hangt aan een security group die door een ander team beheerd wordt en kan verschuiven zonder dat dat hier opvalt.
+- Een afzender buiten de lijst wordt lokaal geweigerd vóór de tokenaanvraag, in plaats van als Graph-`403` midden in het proces — dat scheelt een incident en verbrande retries.
+
+> Dit maakt de Application Access Policy niet overbodig: die blijft de primaire controle, omdat hij ook beschermt wanneer het client secret buiten de plugin om wordt misbruikt. De whitelist kan dat niet.
+
+
 ## Actie: send-email
 
 Verstuur een e-mail vanuit een BPMN-serviceTask.
