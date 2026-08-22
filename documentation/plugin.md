@@ -156,6 +156,27 @@ De eerste drie velden kunnen de twee situaties principieel niet scheiden: bij zo
 
 > **Beperking:** de guard beschermt tegen een retry die dezelfde, nog draaiende JVM-instantie afhandelt — het realistische scenario, waarbij de retry milliseconden tot seconden later plaatsvindt. Hij overleeft géén herstart van de applicatie tussen de oorspronkelijke verzending en een latere retry. Is die garantie in jouw situatie nodig, dan is aanvullende deduplicatie aan de ontvangerskant het aangewezen middel.
 
+**Wanneer de guard de verzending niet meer herkent**
+
+De markering leeft in het geheugen van één JVM en verloopt na 30 minuten. Daaruit volgen drie situaties waarin een retry een al verzonden mail niet als duplicaat ziet en hem opnieuw verstuurt — zonder foutmelding, want technisch gaat er niets mis:
+
+| Situatie | Gevolg | Wat je eraan doet |
+|---|---|---|
+| **Multi-node deployment** | De job-executor is cluster-breed. Wordt de retry door een andere node opgepakt dan de node die verstuurde, dan kent die de markering niet. | Deduplicatie aan ontvangerskant, of accepteer dat de bescherming best-effort is. Er is geen instelling die dit binnen de plugin oplost. |
+| **Retry later dan 30 minuten** | De markering is dan al verlopen. Zie de waarschuwing bij `failedJobRetryTimeCycle` hieronder. | Houd de totale duur van je retry-cyclus onder 30 minuten. |
+| **Herstart tussen verzending en retry** | De markering is met de JVM verdwenen. | Deduplicatie aan ontvangerskant. |
+
+Bij één node, een retry-cyclus binnen het plafond en geen herstart — het gangbare geval — werkt de bescherming zoals beschreven.
+
+De TTL van 30 minuten is een constante in `SendIdempotencyGuard`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan kun je de bean wel vervangen — hij is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
+
+```kotlin
+@Bean
+fun sendIdempotencyGuard() = SendIdempotencyGuard(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
+```
+
+Houd er rekening mee dat een langere TTL de markeringen navenant langer in geheugen houdt. Dat lost bovendien alleen de tweede rij hierboven op: multi-node en een herstart blijven buiten bereik van elke TTL-waarde.
+
 **Transportfouten worden bewust niet opnieuw geprobeerd**
 Een netwerkfout of read-timeout op de verzendaanroep zelf (`sendMail`, `messages/{id}/send`) zegt niets over of Graph het bericht al heeft geaccepteerd. De plugin probeert die aanroep daarom **niet** automatisch opnieuw en meldt de fout als `GraphMailUnknownOutcomeException` — beter één onzekere verzending dan een gegarandeerde dubbele mail bij de ontvanger. Conceptaanmaak en het aanmaken van een upload-sessie zijn wél herhaalbaar en worden wel opnieuw geprobeerd.
 
@@ -235,6 +256,17 @@ Dat verschil is wezenlijk. Graph throttlet mail per mailbox stevig, en eerder ho
 Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff van 500 ms uitzitten is goedkoper dan een job herplannen.
 
 > **Configureer daarom een `failedJobRetryTimeCycle`** op de send-email service task, bijvoorbeeld `R5/PT2M`. Zonder dat valt de plugin terug op de standaard retry-instelling van de engine, die voor throttling meestal te kort is.
+
+> **Let op — er zit een plafond aan die cyclus.** De duplicaatbescherming vergeet een verzending na 30 minuten. Duurt je retry-cyclus langer dan dat, dan is de markering verlopen op het moment dat de laatste pogingen binnenkomen, en wordt een al verzonden mail opnieuw verstuurd. Reken de totale duur dus uit, niet alleen het interval:
+>
+> | Cyclus | Totale duur | Veilig |
+> |---|---|---|
+> | `R5/PT2M` | 10 minuten | ja |
+> | `R3/PT5M` | 15 minuten | ja |
+> | `R5/PT10M` | 50 minuten | **nee** — laatste retries vallen buiten de bescherming |
+> | `R3/PT1H` | 3 uur | **nee** |
+>
+> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SendIdempotencyGuard`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
 
 Resterende maximale blokkeerttijden per verzending:
 
