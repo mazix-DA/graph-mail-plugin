@@ -166,7 +166,16 @@ De markering leeft in het geheugen van één JVM en verloopt na 30 minuten. Daar
 | **Retry later dan 30 minuten** | De markering is dan al verlopen. Zie de waarschuwing bij `failedJobRetryTimeCycle` hieronder. | Houd de totale duur van je retry-cyclus onder 30 minuten. |
 | **Herstart tussen verzending en retry** | De markering is met de JVM verdwenen. | Deduplicatie aan ontvangerskant. |
 
-Bij één node, een retry-cyclus binnen het plafond en geen herstart — het gangbare geval — werkt de bescherming zoals beschreven. De TTL van 30 minuten is een constante in `SendIdempotencyGuard` en niet via configuratie aan te passen.
+Bij één node, een retry-cyclus binnen het plafond en geen herstart — het gangbare geval — werkt de bescherming zoals beschreven.
+
+De TTL van 30 minuten is een constante in `SendIdempotencyGuard`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan kun je de bean wel vervangen — hij is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
+
+```kotlin
+@Bean
+fun sendIdempotencyGuard() = SendIdempotencyGuard(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
+```
+
+Houd er rekening mee dat een langere TTL de markeringen navenant langer in geheugen houdt. Dat lost bovendien alleen de tweede rij hierboven op: multi-node en een herstart blijven buiten bereik van elke TTL-waarde.
 
 **Transportfouten worden bewust niet opnieuw geprobeerd**
 Een netwerkfout of read-timeout op de verzendaanroep zelf (`sendMail`, `messages/{id}/send`) zegt niets over of Graph het bericht al heeft geaccepteerd. De plugin probeert die aanroep daarom **niet** automatisch opnieuw en meldt de fout als `GraphMailUnknownOutcomeException` — beter één onzekere verzending dan een gegarandeerde dubbele mail bij de ontvanger. Conceptaanmaak en het aanmaken van een upload-sessie zijn wél herhaalbaar en worden wel opnieuw geprobeerd.
@@ -257,7 +266,7 @@ Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff 
 > | `R5/PT10M` | 50 minuten | **nee** — laatste retries vallen buiten de bescherming |
 > | `R3/PT1H` | 3 uur | **nee** |
 >
-> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, kies dan bewust: langere retries óf duplicaatbescherming. Beide tegelijk kan de plugin niet garanderen.
+> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SendIdempotencyGuard`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
 
 Resterende maximale blokkeerttijden per verzending:
 
