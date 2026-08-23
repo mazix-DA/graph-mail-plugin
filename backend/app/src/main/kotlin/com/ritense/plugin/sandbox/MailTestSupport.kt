@@ -152,6 +152,11 @@ class MailTestSupport(
     companion object {
         private val logger = KotlinLogging.logger {}
 
+        // Groeit met een procesinstantie-id per uitgevoerde retrytest en wordt nooit
+        // opgeschoond. Bewust zo gelaten: opruimen na de geslaagde tweede passage zou de
+        // administratie kunnen wissen terwijl de transactie daarna alsnog terugdraait, en dan
+        // faalt de volgende poging opnieuw in plaats van te slagen. Een handvol strings per
+        // testrun in een sandbox weegt niet op tegen dat risico.
         private val alreadyFailed = ConcurrentHashMap.newKeySet<String>()
 
         private const val VAR_PASS = "mailPass"
