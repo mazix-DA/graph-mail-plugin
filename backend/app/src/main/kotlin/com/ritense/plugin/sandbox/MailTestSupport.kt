@@ -45,6 +45,8 @@ class MailTestSupport(
      * ontvangen mails kunt zien welke iteratie welke mail stuurde.
      */
     fun storeBody(execution: DelegateExecution) {
+        normaliseHerhalingen(execution)
+
         val pass = ((execution.getVariable(VAR_PASS) as? Number)?.toInt() ?: 0) + 1
         execution.setVariable(VAR_PASS, pass)
 
@@ -121,6 +123,23 @@ class MailTestSupport(
         logger.info { "Tweede passage voor procesinstantie $key — deze taak slaagt nu" }
     }
 
+    /**
+     * Maakt van `herhalingen` een geheel getal en schrijft het terug.
+     *
+     * Het formulierveld is een `number`, dus een gebruiker kan er `3.5` in zetten. De gateway
+     * vergelijkt `mailPass < herhalingen`, en `mailPass` telt met hele stappen — bij 3,5 loopt hij
+     * dus door tot 4 en verstuurt het proces vier mails in plaats van de bedoelde drie. Afkappen
+     * naar beneden maakt de uitkomst gelijk aan wat er in het veld staat.
+     */
+    private fun normaliseHerhalingen(execution: DelegateExecution) {
+        val raw = execution.getVariable(VAR_HERHALINGEN) as? Number ?: return
+        val whole = raw.toInt().coerceAtLeast(1)
+        if (raw.toDouble() != whole.toDouble()) {
+            logger.info { "herhalingen $raw afgekapt naar $whole — de gateway telt in hele verzendingen" }
+        }
+        execution.setVariable(VAR_HERHALINGEN, whole)
+    }
+
     private fun renderHtml(
         bodyText: String,
         pass: Int,
@@ -160,6 +179,7 @@ class MailTestSupport(
         private val alreadyFailed = ConcurrentHashMap.newKeySet<String>()
 
         private const val VAR_PASS = "mailPass"
+        private const val VAR_HERHALINGEN = "herhalingen"
         private const val VAR_SUBJECT = "subject"
         private const val VAR_SUBJECT_RESOLVED = "subjectResolved"
         private const val VAR_BODY_TEXT = "bodyText"
