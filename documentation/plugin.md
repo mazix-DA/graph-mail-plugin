@@ -278,19 +278,24 @@ Resterende maximale blokkeerttijden per verzending:
 
 De twee onderste grenzen zijn geen wachttijd maar werk: het overzetten van een bijlage van 25 MB duurt nu eenmaal. Alleen de bovenste was de bron van de engine-brede stilstand, en die is nu begrensd.
 
-**Minimum vereiste configuratie — voeg dit toe aan `application.yml`:**
+**Minimum vereiste configuratie — vul hiermee het bestaande `operaton`-blok in je `application.yml` aan:**
 
 ```yaml
 operaton:
   bpm:
-    job-executor:
+    job-execution:
       core-pool-size: 20
       max-pool-size: 50
+      queue-capacity: 10
 ```
 
-Bij minder dan 20 threads loop je een reëel risico op een vastgelopen job-executor onder normale productielast. De plugin logt een waarschuwing bij opstarten als herinnering.
+> **De sleutel is `job-execution`, niet `job-executor`.** De Operaton-starter bindt `JobExecutionProperty` onder die naam, en Spring negeert een onbekende sleutel zonder foutmelding. Een typefout hier laat de engine dus stilzwijgend op zijn standaarden van 3 en 10 draaien. Controleer bij het opstarten op `STARTER-SB040 Setting up jobExecutor with corePoolSize=20, maxPoolSize:50`; staan daar 3 en 10, dan is je instelling niet aangekomen.
+>
+> Staat er al een `operaton:`-sleutel in het bestand, voeg deze instellingen dan tóe aan dat blok. Een tweede `operaton:` op het hoogste niveau is ongeldige YAML en laat de applicatie crashen met `found duplicate key operaton`.
 
-> **Let op (queue-size):** bij een thread-pool-executor worden threads bóven `core-pool-size` pas aangemaakt wanneer de wachtrij vol is. Staat `queue-size` hoog, dan blijft de pool in de praktijk op `core-pool-size` steken en doet `max-pool-size` niets. Houd `queue-size` daarom klein als je op de extra threads wilt kunnen leunen, en stem het totale aantal threads af op de database-connectiepool (meer werkers betekent meer gelijktijdige verbindingen).
+Met de standaardpool van 3 threads verwerkt de hele engine — niet alleen e-mail — hooguit drie jobs tegelijk. Een verzending bezet zo'n thread zolang de Graph-aanroep loopt, en bij bijlagen boven 2 MiB zolang de upload duurt; bij enige gelijktijdigheid staat de rest van je procesverwerking daarop te wachten. De plugin logt bij opstarten een waarschuwing als herinnering.
+
+> **Let op (`queue-capacity`):** bij een thread-pool-executor worden threads bóven `core-pool-size` pas aangemaakt wanneer de wachtrij vol is. Staat `queue-capacity` hoog, dan blijft de pool in de praktijk op `core-pool-size` steken en doet `max-pool-size` niets. Houd `queue-capacity` daarom klein als je op de extra threads wilt kunnen leunen, en stem het totale aantal threads af op de database-connectiepool (meer werkers betekent meer gelijktijdige verbindingen).
 
 **Geheugengebruik — schaalt mee met het aantal threads**
 
