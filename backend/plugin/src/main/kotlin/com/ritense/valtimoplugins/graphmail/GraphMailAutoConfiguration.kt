@@ -33,15 +33,24 @@ class GraphMailAutoConfiguration {
     private val logger = LoggerFactory.getLogger(GraphMailAutoConfiguration::class.java)
 
     // Fired once after the full application context is ready.
-    // Reminds operators to size the job-executor thread pool correctly: the plugin's
-    // retry backoff uses Thread.sleep(), which blocks the calling job-executor thread
-    // for up to 30s (regular send) or 120s (upload-session flow for attachments > 2 MB).
+    //
+    // Reminds operators to size the job-executor thread pool. Retry backoff itself is no longer
+    // the concern it once was: MAX_IN_CALL_WAIT_MS caps in-call sleeping at 2s, after which the
+    // send is handed back to the job executor rather than holding its thread. What still occupies
+    // a thread is the work itself — the Graph round-trip, and for attachments above 2 MiB the
+    // chunked upload of the whole payload. A pool sized for a handful of jobs starves on that.
+    //
+    // The property is `operaton.bpm.job-execution` (not `job-executor`): the Operaton starter
+    // binds JobExecutionProperty under that name, and Spring drops an unknown key silently — a
+    // misspelled setting leaves the engine on its 3/10 defaults with no warning at all.
     @EventListener(ApplicationReadyEvent::class)
     fun warnOnStartup() {
         logger.warn(
-            "[Graph Mail Plugin] IMPORTANT: this plugin blocks Operaton job-executor threads during " +
-                "retry backoff (up to 30s per send, 120s for large attachments). " +
-                "Set operaton.bpm.job-executor.core-pool-size >= 20 and max-pool-size >= 50 " +
+            "[Graph Mail Plugin] IMPORTANT: sending occupies an Operaton job-executor thread for " +
+                "the duration of the Graph call, and for attachments above 2 MiB for the duration " +
+                "of the chunked upload. " +
+                "Set operaton.bpm.job-execution.core-pool-size >= 20 and max-pool-size >= 50 " +
+                "(note: job-execution, not job-executor — an unknown key is ignored silently) " +
                 "to prevent job-executor starvation under load, and configure a " +
                 "failedJobRetryTimeCycle on the send-email service task. " +
                 "See documentation/plugin.md for details.",

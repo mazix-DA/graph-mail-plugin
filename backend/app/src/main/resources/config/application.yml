@@ -150,14 +150,17 @@ operaton:
       properties:
         deploy-changed-only: true
         enforceHistoryTimeToLive: false
-    job-executor:
-      # Zie documentation/plugin.md — de Graph Mail plugin blokkeert job-executor threads tijdens
-      # retry-backoff, dus deze pool moet ruim staan.
+    # LET OP: de sleutel is `job-execution`, niet `job-executor`. De Operaton-starter bindt
+    # JobExecutionProperty onder die naam en Spring negeert een onbekende sleutel stilzwijgend —
+    # met `job-executor` draaide deze sandbox ongemerkt op de standaarden 3/10.
+    job-execution:
+      # Zie documentation/plugin.md — een verzending bezet een job-executor thread zolang de
+      # Graph-aanroep loopt, en bij bijlagen boven 2 MiB zolang de upload duurt.
       core-pool-size: 20
       max-pool-size: 50
       # Klein gehouden: bij een thread-pool-executor worden threads bóven core-pool-size pas
       # aangemaakt wanneer de wachtrij vol is, dus een grote queue maakt max-pool-size betekenisloos.
-      queue-size: 10
+      queue-capacity: 10
 
 implementation:
   suwinet:

@@ -66,17 +66,22 @@ Voeg de volgende dependency toe aan je `build.gradle.kts`:
 implementation("com.ritense.valtimoplugins:graph-mail:1.0.4")
 ```
 
-Voeg de volgende configuratie toe aan je `application.yml`:
+Vul in je `application.yml` het `operaton`-blok aan:
 
 ```yaml
 operaton:
   bpm:
-    job-executor:
+    job-execution:
       core-pool-size: 20
       max-pool-size: 50
+      queue-capacity: 10
 ```
 
-> **Verplicht:** zonder voldoende job-executor threads kan de applicatie vastlopen als de Graph API rate-limiteert. Zie [Plugin Documentatie](plugin.md) voor details.
+> **Samenvoegen, niet toevoegen.** Heeft je `application.yml` al een `operaton:`-sleutel — en dat is bij een GZAC-project vrijwel altijd zo — voeg deze instellingen dan tóe aan dat bestaande blok. Een tweede `operaton:` op het hoogste niveau is ongeldige YAML en laat de applicatie bij opstarten crashen met `found duplicate key operaton`.
+
+> **Let op de sleutelnaam:** `job-execution`, niet `job-executor`. Spring negeert een onbekende sleutel stilzwijgend, dus een typefout hier levert geen foutmelding op — de engine blijft dan gewoon op zijn standaarden van 3 en 10 draaien. Controleer bij het opstarten of er `Setting up jobExecutor with corePoolSize=20, maxPoolSize:50` in de log staat.
+
+> **Waarom:** een verzending bezet een job-executor thread zolang de Graph-aanroep loopt, en bij bijlagen boven 2 MiB zolang de upload duurt. Zie [Plugin Documentatie](plugin.md) voor details.
 
 ### Frontend
 
