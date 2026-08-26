@@ -1069,6 +1069,44 @@ class GraphMailClientTest {
         wireMock.verify(0, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
     }
 
+    @Test fun `a draft send that is throttled out of attempts deletes the draft`() {
+        // A 429 that exhausts the attempt limit means the send never happened, and the engine will
+        // re-run the whole activity and build a fresh draft. Leaving this one behind piles orphans
+        // up in a functional mailbox — with an R5/PT2M retry cycle, five per failing send.
+        // Distinct from the UNKNOWN case above, where the message may already be in Sent Items.
+        stubToken()
+        stubDraftCreate()
+        stubUploadSession("${wireMock.baseUrl()}/upload/s1")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        wireMock.stubFor(
+            post(urlPathMatching(sendDraftPath))
+                .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")),
+        )
+        wireMock.stubFor(delete(anyUrl()).willReturn(aResponse().withStatus(204)))
+
+        val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        assertTrue(
+            ex is GraphMailRetryableException,
+            "expected retryable, got ${ex::class.simpleName}",
+        )
+        wireMock.verify(1, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
+    }
+
+    @Test fun `a permanently rejected draft send deletes the draft`() {
+        // Same reasoning: a 403 means nothing was sent, so the draft is an orphan either way.
+        stubToken()
+        stubDraftCreate()
+        stubUploadSession("${wireMock.baseUrl()}/upload/s1")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        wireMock.stubFor(post(urlPathMatching(sendDraftPath)).willReturn(aResponse().withStatus(403)))
+        wireMock.stubFor(delete(anyUrl()).willReturn(aResponse().withStatus(204)))
+
+        assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        wireMock.verify(1, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
+    }
+
     @Test fun `a failed attachment upload does delete the orphaned draft`() {
         stubToken()
         stubDraftCreate()

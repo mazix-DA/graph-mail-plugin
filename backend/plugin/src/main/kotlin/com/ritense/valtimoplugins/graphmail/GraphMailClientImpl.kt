@@ -716,10 +716,7 @@ class GraphMailClientImpl(
         val draftId = createDraftWithRetry(credentials, mail.senderMailbox, draftMessage, deadline)
         logger.debug("Draft created id={}", draftId)
 
-        // Cleanup deliberately covers the upload phase only. Once /send has been called we can no
-        // longer be sure the message is still a draft: a send that succeeded but timed out on the
-        // response has already moved this id to Sent Items, and deleting it there would destroy the
-        // record of a message the recipient actually received.
+        // Every upload-phase failure is safe to clean up after: nothing has been sent yet.
         try {
             for (attachment in mail.attachments) {
                 val uploadUrl = createUploadSession(credentials, mail.senderMailbox, draftId, attachment, deadline)
@@ -731,7 +728,28 @@ class GraphMailClientImpl(
             throw ex
         }
 
-        sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
+        // The send phase splits by what the failure tells us about the message's fate, and the
+        // exception type already carries exactly that.
+        //
+        // GraphMailUnknownOutcomeException means the request reached Graph and the outcome is
+        // genuinely unknown — a send that succeeded but timed out on the response has already moved
+        // this id to Sent Items, and deleting it there would destroy the record of a message the
+        // recipient actually received. Those are left alone, as they always have been.
+        //
+        // A GraphMailRetryableException is a different situation: the send never happened
+        // (throttled out of attempts, a connection that never left the client, the wall-clock
+        // deadline). The engine will re-run the whole activity and build a *new* draft, so leaving
+        // this one behind accumulates orphans in a functional mailbox — with an R5/PT2M cycle,
+        // five per failing send. Permanent failures are the same story: no send, no retry, and
+        // still an orphan.
+        try {
+            sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
+        } catch (ex: GraphMailUnknownOutcomeException) {
+            throw ex
+        } catch (ex: Exception) {
+            deleteDraftBestEffort(credentials, mail.senderMailbox, draftId)
+            throw ex
+        }
     }
 
     private fun deleteDraftBestEffort(
