@@ -529,6 +529,30 @@ class GraphMailClientTest {
         wireMock.verify(2, postRequestedFor(urlPathMatching(mailPath)))
     }
 
+    @Test fun `a tenantId that would reshape the token request is rejected`() {
+        // tenantId is interpolated into the token URL path. Entra accepts a GUID, a verified
+        // domain and the 'common'/'organizations' aliases, so a strict UUID check would break
+        // working configurations — but a value carrying a path or query separator is not a tenant
+        // identifier at all, and used to surface only as a bare 400 blaming the credentials.
+        listOf("tenant/../evil", "tenant?x=1", "tenant#frag", "", "  ").forEach { bad ->
+            assertThrows(IllegalArgumentException::class.java, {
+                client.getAccessToken(GraphCredentials(bad, "c", "s"))
+            }, "'$bad' should not be accepted as a tenantId")
+        }
+    }
+
+    @Test fun `the shapes Entra actually accepts still work as a tenantId`() {
+        stubToken()
+        listOf(
+            "72f988bf-86f1-41af-91ab-2d7cd011db47",
+            "contoso.onmicrosoft.com",
+            "common",
+            "organizations",
+        ).forEach { good ->
+            client.getAccessToken(GraphCredentials(good, "c", "s"))
+        }
+    }
+
     @Test fun `every Graph request carries a client-request-id`() {
         // Microsoft Support asks for this first when investigating a message that never arrived.
         // Before this the plugin sent nothing correlatable at all.

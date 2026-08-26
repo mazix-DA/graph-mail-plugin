@@ -208,6 +208,11 @@ class GraphMailPlugin(
         check(::tenantId.isInitialized && tenantId.isNotBlank()) {
             "Plugin property 'tenantId' is not configured — check the Graph Mail plugin configuration"
         }
+        check(isValidTenantId(tenantId)) {
+            "Plugin property 'tenantId' is not a usable tenant identifier — expected a directory " +
+                "GUID, a verified domain such as 'contoso.onmicrosoft.com', or 'common' / " +
+                "'organizations'. Check the Graph Mail plugin configuration"
+        }
         check(::clientId.isInitialized && clientId.isNotBlank()) {
             "Plugin property 'clientId' is not configured — check the Graph Mail plugin configuration"
         }

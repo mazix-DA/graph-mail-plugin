@@ -209,7 +209,12 @@ class GraphMailClientImpl(
     }
 
     private fun requireCredentials(credentials: GraphCredentials) {
-        require(credentials.tenantId.isNotBlank()) { "tenantId must not be blank" }
+        // Re-checked here as well as in GraphMailPlugin: the test-send endpoint reaches this class
+        // through a different path, and a bad tenantId should fail the same way on both.
+        require(isValidTenantId(credentials.tenantId)) {
+            "tenantId is not a usable tenant identifier — expected a directory GUID, a verified " +
+                "domain, or 'common' / 'organizations'"
+        }
         require(credentials.clientId.isNotBlank()) { "clientId must not be blank" }
         require(credentials.clientSecret.isNotBlank()) { "clientSecret must not be blank" }
     }
@@ -244,9 +249,15 @@ class GraphMailClientImpl(
         deadline: Long? = null,
     ): Pair<String, Instant> {
         val (tenantId, clientId, clientSecret) = credentials
+        // encode() before expand() percent-encodes the substituted value, so a tenantId carrying a
+        // structural character can no longer add a path segment or start a query string. The host
+        // is pinned by the endpoint allowlist either way, so this is defence in depth rather than
+        // a way out of the tenant — but it costs nothing and the plugin already validates every
+        // other externally-supplied string this way.
         val url =
             UriComponentsBuilder
                 .fromUriString("$tokenBaseUrl/{tenantId}/oauth2/v2.0/token")
+                .encode()
                 .build()
                 .expand(tenantId)
                 .toUriString()
