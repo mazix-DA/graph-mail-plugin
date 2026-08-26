@@ -244,6 +244,52 @@ class ActivityInstanceIdContractTest {
         )
     }
 
+    @Test fun `parallel multi-instance gives every instance its own key`() {
+        // The one shape the guard's key was never checked against, and the one where
+        // execution.setVariable() behaves differently: a concurrent execution is not a scope
+        // execution, so Operaton writes the variable to the parent scope.
+        //
+        // Verified here rather than assumed: the three instances really do share one counter —
+        // they record passes 0, 1 and 2 of the same variable, not 0, 0 and 0. What keeps their
+        // keys apart is execution.id, which differs per concurrent child. So the guard is correct
+        // for parallel multi-instance, but for a reason worth writing down, because reading the
+        // delegate suggests the counter alone identifies a pass and here it does not.
+        //
+        // Note what this does *not* cover: with async-before on the multi-instance activity each
+        // instance commits in its own transaction, and three of them writing one parent-scope
+        // variable is a plausible source of optimistic-lock contention. That is a separate
+        // question from key uniqueness and is not settled by this test.
+        deploy(
+            Bpmn
+                .createExecutableProcess(PARALLEL_MULTI_INSTANCE_PROCESS)
+                .startEvent()
+                .serviceTask("send-email")
+                .operatonClass(RecordingDelegate::class.java.name)
+                .multiInstance()
+                .parallel()
+                .cardinality("3")
+                .multiInstanceDone()
+                .endEvent()
+                .done(),
+        )
+
+        engine.runtimeService.startProcessInstanceByKey(PARALLEL_MULTI_INSTANCE_PROCESS)
+
+        assertEquals(3, Recorder.counterKeys.size, "expected three parallel instances")
+        assertEquals(
+            3,
+            Recorder.counterKeys.toSet().size,
+            "parallel instances shared a duplicate-guard key (${Recorder.counterKeys}) — the guard " +
+                "would treat all but one as an already-sent duplicate and silently drop them",
+        )
+        assertEquals(
+            3,
+            Recorder.executionIds.toSet().size,
+            "parallel instances shared an execution id, which is the only thing keeping their keys " +
+                "apart once the counter lands in the shared parent scope",
+        )
+    }
+
     @Test fun `activityInstanceId is never blank`() {
         // The plugin falls back to the old, coarser key when the id is absent. That fallback should
         // stay a defensive branch, not the normal path.
@@ -323,6 +369,7 @@ class ActivityInstanceIdContractTest {
         const val RETRY_PROCESS = "retry-process"
         const val LOOP_PROCESS = "loop-process"
         const val MULTI_INSTANCE_PROCESS = "multi-instance-process"
+        const val PARALLEL_MULTI_INSTANCE_PROCESS = "parallel-multi-instance-process"
         const val SIMPLE_PROCESS = "simple-process"
     }
 }
