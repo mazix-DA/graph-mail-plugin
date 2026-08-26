@@ -323,18 +323,18 @@ Met de standaardpool van 3 threads verwerkt de hele engine — niet alleen e-mai
 
 **Geheugengebruik — schaalt mee met het aantal threads**
 
-Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzending loopt; er wordt niet naar schijf gestreamd. De piek per gelijktijdige verzending is daarmee ruwweg:
+Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzending loopt; er wordt niet naar schijf gestreamd. Twee verschillende grenzen bepalen daarom de piek, en dat is precies waarom je hier niet met één vermenigvuldiging klaar bent:
 
-| Onderdeel | Maximum |
-|-----------|---------|
-| Bijlagen (totaal) | 25 MiB |
-| HTML-body | 5 MiB |
-| Chunk-buffer bij de upload-sessie | 3,2 MiB |
-| **Piek per verzending** | **≈ 33 MiB** |
+| Soort verzending | Piek per verzending | Hoeveel er tegelijk kunnen | Deelplafond |
+|---|---|---|---|
+| Mét bijlagen | ≈ 33 MiB (25 bijlagen + 5 body + 3,2 chunk-buffer) | `graph-mail.http.attachment-concurrency` (default **8**) | ≈ 265 MiB |
+| Zónder bijlagen | ≈ 5 MiB (body) | `operaton.bpm.job-execution.max-pool-size` (aanbevolen **50**) | ≈ 250 MiB |
 
-Dit vermenigvuldigt met het aantal threads dat tegelijk kan verzenden. Met de aanbevolen `max-pool-size: 50` betekent dat in het uiterste geval ruim **1,6 GB heap** die alleen aan e-mails in transit opgaat. Houd hier rekening mee bij het instellen van `-Xmx`, en verhoog `max-pool-size` niet zonder de heap navenant mee te schalen — anders ruil je een vastgelopen job-executor in voor `OutOfMemoryError`.
+Met de standaardwaarden komt het theoretische plafond daarmee op ruwweg **een halve GB** heap voor e-mails in transit.
 
-Verstuur je zelden of nooit grote bijlagen, dan is de praktijkpiek een fractie hiervan: zonder bijlagen blijft het bij de body plus wat overhead.
+> **Reken met `attachment-concurrency`, niet met `max-pool-size`.** Het zijn de verzendingen mét bijlagen die het geheugen opeten, en juist die worden begrensd door de limiter — niet door de thread-pool. Verhoog je `attachment-concurrency`, dan schaalt de bovenste rij één op één mee; dát is de knop die je heap kost. Verhogen van `max-pool-size` raakt alleen de onderste rij.
+
+Verstuur je zelden of nooit grote bijlagen, dan is de praktijkpiek een fractie hiervan: dan blijft het bij de body plus wat overhead.
 
 ## Test-send
 
