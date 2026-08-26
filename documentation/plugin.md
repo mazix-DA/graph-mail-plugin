@@ -201,7 +201,7 @@ Elke mislukte verzending logt een `verdict`-veld dat aangeeft wat de beheerder m
 | Verdict | Betekenis |
 |---------|-----------|
 | `PERMANENT_INPUT` | Invoer- of configuratiefout; opnieuw proberen faalt identiek. Corrigeer de procesdata of de pluginconfiguratie. |
-| `PERMANENT_REMOTE` | Graph weigert dit permanent (bijv. 403 zonder `Mail.Send`, 404 onbekende mailbox). Vereist een configuratie- of permissiewijziging. |
+| `PERMANENT_REMOTE` | De overkant weigert dit permanent en dat verandert niet vanzelf: Graph zelf (bijv. 403 zonder `Mail.Send`, 404 onbekende mailbox), of de uitgaande proxy (407, zie *Uitgaande proxy*). Vereist een configuratie- of permissiewijziging. |
 | `UNKNOWN` | Transportfout na verzending; de mail is mogelijk wél verstuurd. Verifieer voordat je opnieuw uitvoert. |
 | `TRANSIENT` | Tijdelijk (429/5xx, of een netwerkfout op een herhaalbare stap zoals conceptaanmaak, het aanmaken van een upload-sessie, of een verbinding die nooit tot stand kwam); de job-executor probeert het opnieuw. Een transportfout op `sendMail` of `messages/{id}/send` nádat het verzoek verstuurd is valt hier **niet** onder — die is `UNKNOWN`. |
 
@@ -256,7 +256,11 @@ graph-mail:
 
 Loopt het verkeer naar Microsoft via een forward proxy — bij overheidsorganisaties vrijwel altijd — dan hoef je in de regel niets in te stellen: zonder `proxy-host` gebruikt de plugin de proxy die de JVM al kent via `-Dhttps.proxyHost` en `-Dhttps.proxyPort`. Bij het opstarten logt de plugin welke proxy hij gebruikt, of dat hij er geen heeft. Controleer die regel als verzendingen falen met een connectiefout: zo'n fout wordt als *transient* geclassificeerd, dus de job-executor blijft het proberen en de melding ziet eruit als een tijdelijke storing.
 
-Stel `proxy-host` en `proxy-port` alleen in wanneer deze plugin een ándere proxy nodig heeft dan de rest van de applicatie. `non-proxy-hosts` volgt dezelfde notatie als `http.nonProxyHosts`: pipe-gescheiden patronen waarin `*` voor een willekeurige reeks tekens staat.
+Stel `proxy-host` en `proxy-port` alleen in wanneer deze plugin een ándere proxy nodig heeft dan de rest van de applicatie. `non-proxy-hosts` volgt dezelfde notatie als `http.nonProxyHosts`: pipe-gescheiden patronen waarin `*` voor een willekeurige reeks tekens staat. Een komma in plaats van een pipe, of `non-proxy-hosts` zonder `proxy-host`, laat de applicatie bij opstarten falen — beide zouden anders stil niets doen en het verkeer alsnog door de proxy sturen.
+
+> **Een proxy die authenticatie eist wordt niet ondersteund.** De HTTP-client wordt zonder `Authenticator` gebouwd, dus de plugin kan geen proxy-credentials aanbieden. De proxy antwoordt dan met `407` en de verzending faalt als `verdict=PERMANENT_REMOTE`, met een melding die naar de proxy wijst in plaats van naar Graph. Zorg dat de Microsoft-endpoints ongeauthenticeerd door de proxy mogen, of wijs `proxy-host` naar een proxy die voor dit verkeer geen credentials vraagt.
+>
+> Die classificatie is bewust permanent: de proxy weigert elke poging identiek tot iemand de configuratie aanpast, dus herproberen kost alleen het retry-budget van de job-executor.
 
 > De proxy is bewust een deployment-instelling en geen pluginproperty. Al het verkeer naar het token-endpoint loopt erdoorheen, inclusief het formulier waarin het client secret wordt gePOST — instelbaar maken vanuit de beheer-UI zou hetzelfde exfiltratiepad heropenen dat hierboven is gedicht door `tokenBaseUrl` daar weg te halen.
 
