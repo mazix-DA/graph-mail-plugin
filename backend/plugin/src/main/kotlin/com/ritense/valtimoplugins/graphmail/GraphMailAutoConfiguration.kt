@@ -205,6 +205,14 @@ class GraphMailAutoConfiguration {
     fun graphMailGuardStartupCheck(pluginService: PluginService): GraphMailGuardStartupCheck =
         GraphMailGuardStartupCheck(pluginService)
 
+    // Registered as its own bean rather than a listener on this class, mirroring
+    // GraphMailGuardStartupCheck: this class is instantiated directly in tests and must stay
+    // no-arg. See the class doc for why a loud line, and not a refusal to start.
+    @Bean
+    @ConditionalOnMissingBean(GraphMailEndpointAllowlistWarning::class)
+    fun graphMailEndpointAllowlistWarning(properties: GraphMailHttpProperties): GraphMailEndpointAllowlistWarning =
+        GraphMailEndpointAllowlistWarning(properties)
+
     // Single shared instance — see GraphTokenCache's class doc for why the cache must be a
     // bean rather than something each GraphMailClientImpl owns: Valtimo hydrates a fresh
     // GraphMailPlugin per action invocation, so an instance-owned cache never accumulated hits.
