@@ -8,6 +8,12 @@ on:
       - v12
       - main
 
+# Least privilege at the workflow level: this job only ever reads the repository. Without an
+# explicit block the token inherits whatever the repository default is, which for older
+# repositories is read/write on everything.
+permissions:
+  contents: read
+
 jobs:
   # -------------------------------------------------------------
   # Using GitHub's API is not supported for push events

@@ -45,6 +45,16 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
 - Throttling van Entra werd gemeld als "controleer Client ID en Secret".
 - De harde tijdslimiet van 30 seconden per verzending kon met tientallen seconden overschreden worden.
 - Elke mislukte verzending logt nu waarom hij mislukte en of opnieuw proberen zin heeft.
+- Een proxy die om authenticatie vroeg (407) werd behandeld als een tijdelijke storing, dus de
+  job-executor bleef herproberen op iets dat elke poging identiek weigert. Nu een permanente fout
+  die naar de proxy wijst in plaats van naar Graph.
+- Mislukte een verzending via de upload-sessie op een manier waaruit blijkt dat er niets verstuurd
+  is, dan bleef het concept achter in de afzendermailbox. Bij een cyclus als `R5/PT2M` liepen die
+  op tot vijf per mislukte verzending. Een verzending met onzekere afloop laat het concept nog
+  steeds met rust — dat kan al in Verzonden items staan.
+- Een onderbroken verzending (bijvoorbeeld bij het afsluiten van de applicatie) kwam in de
+  auditlog terecht als `verdict=UNCLASSIFIED` met een stacktrace, in plaats van als tijdelijk.
+- Een onbruikbare bijlagenaam of een te lange naam liet de verzending pas bij Graph stuklopen.
 
 ### Beveiliging
 
@@ -52,12 +62,29 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
   CSS-escapes en -commentaar worden nu herkend.
 - Een verkeerd getypt client secret in het testmail-scherm logde de beheerder uit.
 - E-mailadressen worden nu ook gemaskeerd in foutmeldingen van het testmail-endpoint.
+- `graph-mail.http.allow-non-microsoft-endpoints` schakelt de endpoint-controle uit maar logde
+  niets. Staat de vlag aan, dan meldt de plugin dat nu bij elke start als `ERROR`.
+- `tenantId` wordt server-side gevalideerd en percent-encoded in de token-URL. Geen UUID-eis: een
+  verified domain en de aliassen `common` / `organizations` blijven gewoon geldig.
+- De naam en het content-type van een bijlage komen uit resource-metadata en gingen ongefilterd
+  door naar Graph en de logging. Nu gecontroleerd zoals elk ander extern beinvloedbaar veld.
+- Het `non-proxy-hosts`-veld accepteerde een komma-gescheiden lijst die stil nergens op matchte,
+  waardoor intranetverkeer alsnog door de proxy ging. Dat is nu een startupfout.
 
 ### Overig
 
 - Eén gedeelde HTTP-verbinding voor alle verzendingen in plaats van een nieuwe per e-mail.
 - `graph-mail.http.attachment-concurrency` begrenst hoeveel verzendingen met bijlagen tegelijk
   lopen. Zonder die grens kon een piek in bijlagen het geheugen laten vollopen.
+- Elk Graph-verzoek draagt nu een `client-request-id`, en bij een fout staan dat id en Graphs eigen
+  `request-id` in de auditlog. Dat zijn de twee waarden waar Microsoft Support als eerste om vraagt.
+- Micrometer-metrics wanneer de applicatie Actuator heeft: `graph.mail.sends`,
+  `graph.mail.send.duration`, en gauges voor de vrije bijlage-slots en de tokencache. De
+  `outcome`-tag gebruikt hetzelfde vocabulaire als het `verdict`-veld in de auditlog. Zonder
+  Micrometer op het classpath verandert er niets.
+- Waar de duplicaatguard zijn markeringen bewaart zit nu achter `SentMarkerStore`. Draai je meerdere
+  nodes, dan kun je een eigen implementatie bijzetten zonder de guard zelf te vervangen; zie
+  [plugin.md](plugin.md). De standaard blijft in-memory en dus per JVM.
 
 ## 1.0.3
 

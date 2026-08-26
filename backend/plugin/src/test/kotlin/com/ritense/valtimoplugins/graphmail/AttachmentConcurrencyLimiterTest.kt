@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 class AttachmentConcurrencyLimiterTest {
     @Test fun `sends without attachments are never blocked`() {
@@ -70,6 +72,47 @@ class AttachmentConcurrencyLimiterTest {
 
         assertEquals(1, limiter.availablePermits())
         assertEquals("ok", limiter.withPermit(hasAttachments = true) { "ok" })
+    }
+
+    @Test fun `an interrupted wait restores the flag and reports a transient`() {
+        // An engine shutting down interrupts its job-executor threads. Catching the interrupt
+        // clears the flag, so the rest of the shutdown path can no longer see it; and a raw
+        // InterruptedException escaping produces an UNCLASSIFIED verdict plus a stack trace,
+        // rather than the transient this actually is.
+        val limiter = AttachmentConcurrencyLimiter(permits = 1, acquireTimeoutMs = 10_000)
+        val occupied = CountDownLatch(1)
+        val holder =
+            thread {
+                limiter.withPermit(hasAttachments = true) {
+                    occupied.countDown()
+                    Thread.sleep(5_000)
+                }
+            }
+        assertTrue(occupied.await(5, TimeUnit.SECONDS), "the first send never took its permit")
+
+        val caught = AtomicReference<Throwable>()
+        val flagStillSet = AtomicBoolean(false)
+        val waiter =
+            thread {
+                try {
+                    limiter.withPermit(hasAttachments = true) { }
+                } catch (ex: Throwable) {
+                    caught.set(ex)
+                    flagStillSet.set(Thread.currentThread().isInterrupted)
+                }
+            }
+
+        Thread.sleep(200)
+        waiter.interrupt()
+        waiter.join(5_000)
+        holder.interrupt()
+        holder.join(5_000)
+
+        assertTrue(
+            caught.get() is GraphMailRetryableException,
+            "expected a transient, got ${caught.get()?.let { it::class.simpleName }}",
+        )
+        assertTrue(flagStillSet.get(), "the interrupt flag was swallowed")
     }
 
     @Test fun `concurrency never exceeds the configured permits`() {

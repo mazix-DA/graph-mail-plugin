@@ -66,7 +66,12 @@ data class GraphMailHttpProperties(
      */
     val proxyHost: String? = null,
     val proxyPort: Int? = null,
-    /** Pipe-separated host patterns that bypass the proxy, e.g. `localhost|*.intern.example.nl`. */
+    /**
+     * Pipe-separated host patterns that bypass the proxy, e.g. `localhost|*.intern.example.nl`.
+     *
+     * Only applies alongside [proxyHost]; without one the JVM's own `http.nonProxyHosts` decides,
+     * and setting this would do nothing at all — which [init] rejects rather than ignores.
+     */
     val nonProxyHosts: String? = null,
 ) {
     init {
@@ -94,8 +99,13 @@ data class GraphMailHttpProperties(
                 "graph-mail.http.proxy-host must not contain whitespace or control characters " +
                     "(got '$proxyHost')."
             }
-            require(!proxyHost.contains("://") && !proxyHost.contains('/')) {
-                "graph-mail.http.proxy-host must be a bare hostname without scheme or path " +
+            // ':' belongs here with the other structural characters: a host of the form
+            // "proxy.example.nl:8080" clears the scheme and path checks, and then
+            // InetSocketAddress.createUnresolved() happily builds an address whose hostname
+            // contains a colon. That only surfaces as a DNS failure at connect time, long after
+            // the misconfiguration could have been reported here.
+            require(!proxyHost.contains("://") && !proxyHost.contains('/') && !proxyHost.contains(':')) {
+                "graph-mail.http.proxy-host must be a bare hostname without scheme, port or path " +
                     "(got '$proxyHost'). Use proxy-port for the port."
             }
             requireNotNull(proxyPort) {
@@ -103,6 +113,33 @@ data class GraphMailHttpProperties(
             }
             require(proxyPort in 1..65535) {
                 "graph-mail.http.proxy-port must be between 1 and 65535 (got $proxyPort)."
+            }
+        }
+        if (nonProxyHosts != null) {
+            // A bypass list that silently matches nothing is worse than no bypass list at all:
+            // intranet and loopback traffic then goes through the proxy while the configuration
+            // reads as though it does not. Both mistakes below fail exactly that way, so both are
+            // rejected here rather than discovered in a packet capture.
+            requireNotNull(proxyHost) {
+                "graph-mail.http.non-proxy-hosts only applies to an explicitly configured proxy, " +
+                    "but graph-mail.http.proxy-host is not set. Remove it, or set proxy-host too. " +
+                    "(Without proxy-host the JVM's own http.nonProxyHosts governs the bypass.)"
+            }
+            require(nonProxyHosts.none { it == ',' }) {
+                "graph-mail.http.non-proxy-hosts is pipe-separated, not comma-separated " +
+                    "(got '$nonProxyHosts'). A comma becomes part of the pattern, so the entry " +
+                    "matches nothing and the bypass silently does nothing."
+            }
+            // Whitespace *around* an entry is fine — BypassingProxySelector trims each one — but
+            // whitespace inside one becomes part of the pattern and stops it from ever matching.
+            val entries = nonProxyHosts.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+            require(entries.isNotEmpty()) {
+                "graph-mail.http.non-proxy-hosts contains no usable entry (got '$nonProxyHosts')."
+            }
+            require(entries.none { entry -> entry.any { it.isWhitespace() || it.isISOControl() } }) {
+                "graph-mail.http.non-proxy-hosts entries must not contain whitespace or control " +
+                    "characters (got '$nonProxyHosts'). Whitespace inside an entry becomes part of " +
+                    "the pattern and stops it from matching."
             }
         }
         if (!allowNonMicrosoftEndpoints) {

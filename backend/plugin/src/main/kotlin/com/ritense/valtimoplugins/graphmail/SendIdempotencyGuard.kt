@@ -1,18 +1,11 @@
 package com.ritense.valtimoplugins.graphmail
 
-import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
-// Default capacity before stale entries get swept. Sized generously above realistic concurrent
-// in-flight-retry counts — see evictStaleIfNeeded.
+// Default capacity before stale lock entries get swept — see evictStaleLocksIfNeeded.
 private const val DEFAULT_MAX_ENTRIES = 1_000
-
-// How long a "sent" marker is kept. Must comfortably exceed the time between a job-executor
-// retry attempt and the original attempt that succeeded — MAX_DRAFT_SEND_WALL_CLOCK_MS (120s)
-// plus normal Operaton retry backoff is well under this.
-private const val DEFAULT_ENTRY_TTL_MS = 30L * 60L * 1000L // 30 minutes
 
 /**
  * Guards [GraphMailPlugin.sendEmail] against duplicate sends when Operaton retries a
@@ -44,10 +37,12 @@ private const val DEFAULT_ENTRY_TTL_MS = 30L * 60L * 1000L // 30 minutes
  * so a guard owned by the plugin instance would never see the earlier attempt's marker.
  */
 class SendIdempotencyGuard(
+    // Where markers live. The default is in-memory and therefore per-JVM; see SentMarkerStore for
+    // what a multi-node deployment needs instead and why the locking stays here rather than moving
+    // into the store.
+    private val store: SentMarkerStore = InMemorySentMarkerStore(),
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
-    private val entryTtlMs: Long = DEFAULT_ENTRY_TTL_MS,
 ) {
-    private val sentAt = ConcurrentHashMap<String, Instant>()
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
     // Size of `locks` at the last eviction scan that found nothing to remove. Guards against
@@ -84,15 +79,9 @@ class SendIdempotencyGuard(
         }
     }
 
-    private fun isSent(key: String): Boolean {
-        val at = sentAt[key] ?: return false
-        return Instant.now().isBefore(at.plusMillis(entryTtlMs))
-    }
+    private fun isSent(key: String): Boolean = store.isSent(key)
 
-    private fun markSent(key: String) {
-        evictStaleIfNeeded()
-        sentAt[key] = Instant.now()
-    }
+    private fun markSent(key: String) = store.markSent(key)
 
     // Returns a Lock for `key`, held (locked) by the caller on return — the caller must unlock
     // it. Acquires and validates in a loop rather than a single computeIfAbsent+lock: a lock is
@@ -127,13 +116,13 @@ class SendIdempotencyGuard(
         if (size <= locksSizeAtLastEviction.get()) return
         locksSizeAtLastEviction.set(size)
         locks.keys
-            .filter { it != currentKey && !sentAt.containsKey(it) }
+            .filter { it != currentKey && !hasMarker(it) }
             .toList()
             .forEach { k ->
                 val lock = locks[k] ?: return@forEach
                 if (lock.tryLock()) {
                     try {
-                        if (!sentAt.containsKey(k)) locks.remove(k)
+                        if (!hasMarker(k)) locks.remove(k)
                     } finally {
                         lock.unlock()
                     }
@@ -141,12 +130,9 @@ class SendIdempotencyGuard(
             }
     }
 
-    // sentAt only grows (one entry per distinct execution+activity that has ever sent). Once it
-    // gets large, sweep out entries already past their TTL — mirrors the eviction pattern in
-    // GraphTokenCache / GraphMailTestSendController's rate-limit store.
-    private fun evictStaleIfNeeded() {
-        if (sentAt.size < maxEntries) return
-        val now = Instant.now()
-        sentAt.entries.removeIf { now.isAfter(it.value.plusMillis(entryTtlMs)) }
-    }
+    // Only the in-memory store can answer "is there a marker, expired or not" cheaply. For any
+    // other store, fall back to the TTL-aware check: at worst a lock for an expired key survives
+    // one extra scan, which costs a map entry and nothing else.
+    private fun hasMarker(key: String): Boolean =
+        if (store is InMemorySentMarkerStore) store.contains(key) else store.isSent(key)
 }

@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
+import java.util.UUID
 import kotlin.random.Random
 
 private const val TOKEN_EXPIRY_BUFFER_SECONDS = 60L
@@ -61,7 +62,15 @@ private const val MAX_CAUSE_DEPTH = 10
 // 4xx statuses that no amount of retrying will change: they need a configuration, permission or
 // input fix first. Everything else in the 4xx range is treated as possibly transient so the job
 // executor keeps its normal retry behaviour.
-private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 409, 413, 422)
+// 407 is in here because it is never Graph talking: it is the egress proxy demanding credentials
+// this client cannot supply (no Authenticator is configured). Retrying repeats it identically.
+private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 407, 409, 413, 422)
+
+// Graph echoes this back on the response and records it on its side. Microsoft Support asks for
+// these first when investigating "our mail never arrived", and without them a case is very hard to
+// substantiate — the plugin sent nothing correlatable at all before.
+private const val CLIENT_REQUEST_ID_HEADER = "client-request-id"
+private const val REQUEST_ID_HEADER = "request-id"
 
 // Hosts Graph legitimately hands back for an attachment upload session.
 private val MICROSOFT_UPLOAD_HOST_SUFFIXES =
@@ -102,7 +111,19 @@ private class WaitBudget(
             )
         }
         spentMs += requestedMs
-        Thread.sleep(requestedMs)
+        try {
+            Thread.sleep(requestedMs)
+        } catch (ex: InterruptedException) {
+            // Same reasoning as AttachmentConcurrencyLimiter: catching an interrupt clears the
+            // flag, so restore it before converting. A shutdown interrupting a backoff is a
+            // transient, not the UNCLASSIFIED verdict a bare InterruptedException produces.
+            Thread.currentThread().interrupt()
+            throw GraphMailRetryableException(
+                "Interrupted while waiting to retry ($what) — the application is most likely " +
+                    "shutting down. The job executor will retry.",
+                ex,
+            )
+        }
     }
 }
 
@@ -188,7 +209,12 @@ class GraphMailClientImpl(
     }
 
     private fun requireCredentials(credentials: GraphCredentials) {
-        require(credentials.tenantId.isNotBlank()) { "tenantId must not be blank" }
+        // Re-checked here as well as in GraphMailPlugin: the test-send endpoint reaches this class
+        // through a different path, and a bad tenantId should fail the same way on both.
+        require(isValidTenantId(credentials.tenantId)) {
+            "tenantId is not a usable tenant identifier — expected a directory GUID, a verified " +
+                "domain, or 'common' / 'organizations'"
+        }
         require(credentials.clientId.isNotBlank()) { "clientId must not be blank" }
         require(credentials.clientSecret.isNotBlank()) { "clientSecret must not be blank" }
     }
@@ -223,9 +249,15 @@ class GraphMailClientImpl(
         deadline: Long? = null,
     ): Pair<String, Instant> {
         val (tenantId, clientId, clientSecret) = credentials
+        // encode() before expand() percent-encodes the substituted value, so a tenantId carrying a
+        // structural character can no longer add a path segment or start a query string. The host
+        // is pinned by the endpoint allowlist either way, so this is defence in depth rather than
+        // a way out of the tenant — but it costs nothing and the plugin already validates every
+        // other externally-supplied string this way.
         val url =
             UriComponentsBuilder
                 .fromUriString("$tokenBaseUrl/{tenantId}/oauth2/v2.0/token")
+                .encode()
                 .build()
                 .expand(tenantId)
                 .toUriString()
@@ -403,7 +435,7 @@ class GraphMailClientImpl(
         // recipient a duplicate message when it lands wrong. Only set this for steps that are
         // provably repeatable: draft creation and upload-session creation.
         retryOnTransportError: Boolean,
-        request: (token: String) -> T,
+        request: (token: String, clientRequestId: String) -> T,
     ): T {
         var tokenRefreshed = false
         var forceFreshToken = false
@@ -425,8 +457,11 @@ class GraphMailClientImpl(
                 } else {
                     getAccessToken(credentials, deadline)
                 }
+            // A fresh id per attempt, not per call: Microsoft Support correlates on a single
+            // request, and a retry is a different request on their side too.
+            val clientRequestId = UUID.randomUUID().toString()
             try {
-                return request(token)
+                return request(token, clientRequestId)
             } catch (ex: HttpClientErrorException) {
                 when (ex.statusCode.value()) {
                     401 -> {
@@ -437,7 +472,8 @@ class GraphMailClientImpl(
                                 permissionHint,
                             )
                             throw GraphMailTokenExpiredException(
-                                "Token rejected during $actionLabel (401) even after refresh — check $permissionHint",
+                                "Token rejected during $actionLabel (401) even after refresh — check " +
+                                    "$permissionHint [${correlation(clientRequestId, ex.responseHeaders)}]",
                                 ex,
                             )
                         }
@@ -481,16 +517,21 @@ class GraphMailClientImpl(
                         val status = ex.statusCode.value()
                         val permanent = status in PERMANENT_CLIENT_ERROR_STATUSES
                         val remedy = remedyFor(status, permissionHint)
+                        val ids = correlation(clientRequestId, ex.responseHeaders)
                         logger.error(
-                            "Graph API rejected {} ({}) — {}: mailbox='{}'. {}",
+                            "Graph API rejected {} ({}) — {}: mailbox='{}' {}. {}",
                             actionLabel,
                             ex.statusCode,
                             if (permanent) "PERMANENT, not retried" else "possibly transient",
                             maskEmail(mailbox),
+                            ids,
                             remedy,
                         )
+                        // The ids ride along in the message so they survive into SEND_FAIL in the
+                        // audit log, which is where an administrator actually looks before opening
+                        // a case with Microsoft.
                         val message =
-                            "Graph API rejected $actionLabel (${ex.statusCode}). $remedy"
+                            "Graph API rejected $actionLabel (${ex.statusCode}). $remedy [$ids]"
                         throw if (permanent) {
                             GraphMailPermanentException(message, ex, statusCode = status)
                         } else {
@@ -507,7 +548,8 @@ class GraphMailClientImpl(
                         ex.statusCode,
                     )
                     throw GraphMailRetryableException(
-                        "Graph API unavailable during $actionLabel after $MAX_RETRIES attempts (${ex.statusCode})",
+                        "Graph API unavailable during $actionLabel after $MAX_RETRIES attempts " +
+                            "(${ex.statusCode}) [${correlation(clientRequestId, ex.responseHeaders)}]",
                         ex,
                         statusCode = ex.statusCode.value(),
                     )
@@ -584,6 +626,17 @@ class GraphMailClientImpl(
         }
     }
 
+    // The pair an administrator hands to Microsoft Support. Graph's own request-id comes back on
+    // the response (including on an error response); the client-request-id is the one we generated
+    // for this attempt. Neither contains PII, so neither is masked.
+    private fun correlation(
+        clientRequestId: String,
+        headers: HttpHeaders?,
+    ): String {
+        val graphRequestId = headers?.getFirst(REQUEST_ID_HEADER) ?: "(none)"
+        return "client-request-id=$clientRequestId graph-request-id=$graphRequestId"
+    }
+
     // Turns a bare status code into something an administrator reading the GZAC logs can act on,
     // instead of "Graph API rejected email send (403)" with no indication of what to change.
     private fun remedyFor(
@@ -594,6 +647,11 @@ class GraphMailClientImpl(
             400 ->
                 "Graph rejected the request payload — check the sender mailbox, recipient addresses " +
                     "and subject for values Graph considers malformed."
+            407 ->
+                "The outbound proxy demands authentication and this client cannot supply it — the " +
+                    "JDK HTTP client is built without an Authenticator. Point " +
+                    "graph-mail.http.proxy-host at a proxy that does not require credentials for " +
+                    "the Microsoft endpoints, or allow those endpoints through unauthenticated."
             403 ->
                 "Access denied — grant $permissionHint as an *application* permission on the Azure app " +
                     "registration and give it admin consent. If the permission is already granted, check " +
@@ -709,10 +767,7 @@ class GraphMailClientImpl(
         val draftId = createDraftWithRetry(credentials, mail.senderMailbox, draftMessage, deadline)
         logger.debug("Draft created id={}", draftId)
 
-        // Cleanup deliberately covers the upload phase only. Once /send has been called we can no
-        // longer be sure the message is still a draft: a send that succeeded but timed out on the
-        // response has already moved this id to Sent Items, and deleting it there would destroy the
-        // record of a message the recipient actually received.
+        // Every upload-phase failure is safe to clean up after: nothing has been sent yet.
         try {
             for (attachment in mail.attachments) {
                 val uploadUrl = createUploadSession(credentials, mail.senderMailbox, draftId, attachment, deadline)
@@ -724,7 +779,28 @@ class GraphMailClientImpl(
             throw ex
         }
 
-        sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
+        // The send phase splits by what the failure tells us about the message's fate, and the
+        // exception type already carries exactly that.
+        //
+        // GraphMailUnknownOutcomeException means the request reached Graph and the outcome is
+        // genuinely unknown — a send that succeeded but timed out on the response has already moved
+        // this id to Sent Items, and deleting it there would destroy the record of a message the
+        // recipient actually received. Those are left alone, as they always have been.
+        //
+        // A GraphMailRetryableException is a different situation: the send never happened
+        // (throttled out of attempts, a connection that never left the client, the wall-clock
+        // deadline). The engine will re-run the whole activity and build a *new* draft, so leaving
+        // this one behind accumulates orphans in a functional mailbox — with an R5/PT2M cycle,
+        // five per failing send. Permanent failures are the same story: no send, no retry, and
+        // still an orphan.
+        try {
+            sendDraftWithRetry(credentials, mail.senderMailbox, draftId, deadline)
+        } catch (ex: GraphMailUnknownOutcomeException) {
+            throw ex
+        } catch (ex: Exception) {
+            deleteDraftBestEffort(credentials, mail.senderMailbox, draftId)
+            throw ex
+        }
     }
 
     private fun deleteDraftBestEffort(
@@ -773,11 +849,12 @@ class GraphMailClientImpl(
             // Safe to retry: a duplicate draft is invisible to the recipient, and an orphan is
             // cleaned up by deleteDraftBestEffort.
             retryOnTransportError = true,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(uri)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(message)
                 .retrieve()
@@ -820,11 +897,12 @@ class GraphMailClientImpl(
                 permissionHint = "Mail.ReadWrite permission",
                 // Safe to retry: creating a second upload session has no user-visible effect.
                 retryOnTransportError = true,
-            ) { token ->
+            ) { token, clientRequestId ->
                 restClient
                     .post()
                     .uri(uri)
                     .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                    .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
@@ -1035,11 +1113,12 @@ class GraphMailClientImpl(
             permissionHint = "Mail.Send permission",
             // NOT safe to retry: the draft may already have been accepted for delivery.
             retryOnTransportError = false,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(uri)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentLength(0)
                 .retrieve()
                 .toBodilessEntity()
@@ -1062,11 +1141,12 @@ class GraphMailClientImpl(
             permissionHint = "Mail.Send permission",
             // NOT safe to retry: Graph may already have queued the message for delivery.
             retryOnTransportError = false,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(url)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(payload)
                 .retrieve()

@@ -16,6 +16,7 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.ritense.resource.service.TemporaryResourceStorageService
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -387,6 +388,139 @@ class GraphMailPluginTest {
         verify(mailClient).sendMail(any(), captor.capture())
         assertEquals(1, captor.firstValue.attachments.size)
         assertEquals("doc.pdf", captor.firstValue.attachments[0].name)
+    }
+
+    @Test fun `a successful send is counted as ok`() {
+        val registry = SimpleMeterRegistry()
+        pluginWithMetrics(registry).sendEmail(
+            execution,
+            "afzender@test.nl",
+            "jan@test.nl",
+            null,
+            null,
+            null,
+            "Onderwerp",
+            VALID_CONTENT_UUID,
+            null,
+        )
+
+        assertEquals(
+            1.0,
+            registry
+                .find("graph.mail.sends")
+                .tag("outcome", "ok")
+                .counter()
+                ?.count(),
+        )
+    }
+
+    @Test fun `a failed send is counted under the same verdict the audit log uses`() {
+        // The verdict is what tells an administrator whether to wait or to go change something.
+        // A dashboard that invents its own words for that is a second taxonomy to keep in sync.
+        val registry = SimpleMeterRegistry()
+        whenever(mailClient.sendMail(any(), any()))
+            .thenThrow(GraphMailPermanentException("Graph said no"))
+
+        assertThrows<GraphMailPermanentException> {
+            pluginWithMetrics(registry).sendEmail(
+                execution,
+                "afzender@test.nl",
+                "jan@test.nl",
+                null,
+                null,
+                null,
+                "Onderwerp",
+                VALID_CONTENT_UUID,
+                null,
+            )
+        }
+
+        assertEquals(
+            1.0,
+            registry
+                .find("graph.mail.sends")
+                .tag("outcome", "PERMANENT_REMOTE")
+                .counter()
+                ?.count(),
+            "expected a PERMANENT_REMOTE counter, got ${registry.meters.map { it.id }}",
+        )
+    }
+
+    private fun pluginWithMetrics(registry: SimpleMeterRegistry) =
+        GraphMailPlugin(
+            mailClient,
+            storage,
+            eventPublisher,
+            SendIdempotencyGuard(),
+            AttachmentConcurrencyLimiter(),
+            GraphMailMetrics(registry),
+        ).apply {
+            tenantId = "test-tenant"
+            clientId = "test-client"
+            clientSecret = "test-secret"
+            allowedSenders = "@test.nl"
+        }
+
+    @Test fun `a file name with CRLF is rejected like every other header-bearing field`() {
+        // Resource metadata is externally influenced — an uploaded file names itself — and this
+        // name reaches both the Graph payload and the audit log. Every other such string in this
+        // plugin already goes through requireNoControlChars.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "invoice\r\nBcc: attacker@evil.nl.pdf", "contentType" to "application/pdf"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        assertThrows<IllegalArgumentException> { send(attachments = VALID_UUID) }
+    }
+
+    @Test fun `an over-long file name is trimmed but keeps its extension`() {
+        // Graph rejects a name over 255 characters, but there the failure arrives as an opaque 400
+        // halfway through a send. Losing the extension would leave the recipient an unopenable
+        // blob, so the trim keeps it.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "a".repeat(400) + ".pdf", "contentType" to "application/pdf"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        val name = captor.firstValue.attachments[0].name
+        assertTrue(name.length <= 255, "name is still ${name.length} characters")
+        assertTrue(name.endsWith(".pdf"), "the extension was lost: $name")
+    }
+
+    @Test fun `an unusable content type falls back instead of failing the send`() {
+        // The content type is metadata about the file, not the file. Refusing to send over it
+        // would fail a message whose content is perfectly fine.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "doc.pdf", "contentType" to "not a content type at all"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        assertEquals("application/octet-stream", captor.firstValue.attachments[0].contentType)
+    }
+
+    @Test fun `a content type with parameters is left alone`() {
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "doc.csv", "contentType" to "text/csv; charset=utf-8"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        assertEquals("text/csv; charset=utf-8", captor.firstValue.attachments[0].contentType)
     }
 
     @Test fun `empty attachments when ids null`() {

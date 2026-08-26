@@ -168,14 +168,27 @@ De markering leeft in het geheugen van één JVM en verloopt na 30 minuten. Daar
 
 Bij één node, een retry-cyclus binnen het plafond en geen herstart — het gangbare geval — werkt de bescherming zoals beschreven.
 
-De TTL van 30 minuten is een constante in `SendIdempotencyGuard`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan kun je de bean wel vervangen — hij is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
+De TTL van 30 minuten is een constante in `InMemorySentMarkerStore`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan vervang je de store-bean — die is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
 
 ```kotlin
 @Bean
-fun sendIdempotencyGuard() = SendIdempotencyGuard(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
+fun sentMarkerStore(): SentMarkerStore = InMemorySentMarkerStore(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
 ```
 
 Houd er rekening mee dat een langere TTL de markeringen navenant langer in geheugen houdt. Dat lost bovendien alleen de tweede rij hierboven op: multi-node en een herstart blijven buiten bereik van elke TTL-waarde.
+
+**Multi-node: een eigen markeringsopslag**
+
+Waar de markeringen leven zit achter `SentMarkerStore`, juist omdat de standaard in-memory is en dus per JVM geldt. Draai je meerdere nodes en heb je de garantie echt nodig, dan lever je een eigen implementatie:
+
+```kotlin
+@Bean
+fun sentMarkerStore(): SentMarkerStore = JdbcSentMarkerStore(dataSource)
+```
+
+> **Eén eis, en die is bepalend:** de opslag moet **buiten de omliggende transactie** committen — bijvoorbeeld in een `REQUIRES_NEW`-scope. Daar draait de hele guard om. De storing waar hij voor bestaat is een transactie die terugrolt *nadat* Graph het bericht al heeft geaccepteerd; een markering die het lot van die transactie deelt rolt mee terug en is voor de volgende poging nooit zichtbaar. Een gewone `@Transactional`-schrijfactie is daarmee niet beter dan een procesvariabele.
+
+De plugin levert bewust géén JDBC-implementatie mee: dat betekent een tabel, een changelog en een schemawijziging bij elke afnemer, en die keuze hoort bij de beheerder van de omgeving te liggen. Het aanknopingspunt staat klaar. De vergrendeling per sleutel blijft in `SendIdempotencyGuard`, dus een eigen store hoeft alleen markeringen op te slaan en terug te lezen, en moet thread-safe zijn.
 
 **Transportfouten worden bewust niet opnieuw geprobeerd**
 Een netwerkfout of read-timeout op de verzendaanroep zelf (`sendMail`, `messages/{id}/send`) zegt niets over of Graph het bericht al heeft geaccepteerd. De plugin probeert die aanroep daarom **niet** automatisch opnieuw en meldt de fout als `GraphMailUnknownOutcomeException` — beter één onzekere verzending dan een gegarandeerde dubbele mail bij de ontvanger. Conceptaanmaak en het aanmaken van een upload-sessie zijn wél herhaalbaar en worden wel opnieuw geprobeerd.
@@ -277,7 +290,7 @@ Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff 
 > | `R5/PT10M` | 50 minuten | **nee** — laatste retries vallen buiten de bescherming |
 > | `R3/PT1H` | 3 uur | **nee** |
 >
-> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SendIdempotencyGuard`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
+> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SentMarkerStore`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
 
 Resterende maximale blokkeerttijden per verzending:
 
@@ -310,18 +323,18 @@ Met de standaardpool van 3 threads verwerkt de hele engine — niet alleen e-mai
 
 **Geheugengebruik — schaalt mee met het aantal threads**
 
-Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzending loopt; er wordt niet naar schijf gestreamd. De piek per gelijktijdige verzending is daarmee ruwweg:
+Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzending loopt; er wordt niet naar schijf gestreamd. Twee verschillende grenzen bepalen daarom de piek, en dat is precies waarom je hier niet met één vermenigvuldiging klaar bent:
 
-| Onderdeel | Maximum |
-|-----------|---------|
-| Bijlagen (totaal) | 25 MiB |
-| HTML-body | 5 MiB |
-| Chunk-buffer bij de upload-sessie | 3,2 MiB |
-| **Piek per verzending** | **≈ 33 MiB** |
+| Soort verzending | Piek per verzending | Hoeveel er tegelijk kunnen | Deelplafond |
+|---|---|---|---|
+| Mét bijlagen | ≈ 33 MiB (25 bijlagen + 5 body + 3,2 chunk-buffer) | `graph-mail.http.attachment-concurrency` (default **8**) | ≈ 265 MiB |
+| Zónder bijlagen | ≈ 5 MiB (body) | `operaton.bpm.job-execution.max-pool-size` (aanbevolen **50**) | ≈ 250 MiB |
 
-Dit vermenigvuldigt met het aantal threads dat tegelijk kan verzenden. Met de aanbevolen `max-pool-size: 50` betekent dat in het uiterste geval ruim **1,6 GB heap** die alleen aan e-mails in transit opgaat. Houd hier rekening mee bij het instellen van `-Xmx`, en verhoog `max-pool-size` niet zonder de heap navenant mee te schalen — anders ruil je een vastgelopen job-executor in voor `OutOfMemoryError`.
+Met de standaardwaarden komt het theoretische plafond daarmee op ruwweg **een halve GB** heap voor e-mails in transit.
 
-Verstuur je zelden of nooit grote bijlagen, dan is de praktijkpiek een fractie hiervan: zonder bijlagen blijft het bij de body plus wat overhead.
+> **Reken met `attachment-concurrency`, niet met `max-pool-size`.** Het zijn de verzendingen mét bijlagen die het geheugen opeten, en juist die worden begrensd door de limiter — niet door de thread-pool. Verhoog je `attachment-concurrency`, dan schaalt de bovenste rij één op één mee; dát is de knop die je heap kost. Verhogen van `max-pool-size` raakt alleen de onderste rij.
+
+Verstuur je zelden of nooit grote bijlagen, dan is de praktijkpiek een fractie hiervan: dan blijft het bij de body plus wat overhead.
 
 ## Test-send
 

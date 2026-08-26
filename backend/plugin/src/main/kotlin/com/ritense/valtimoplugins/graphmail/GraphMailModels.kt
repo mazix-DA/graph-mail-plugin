@@ -87,8 +87,8 @@ data class GraphMessage(
     @JsonProperty("replyTo") val replyTo: List<GraphRecipient> = emptyList(),
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     @JsonProperty("attachments") val attachments: List<GraphAttachment> = emptyList(),
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    @JsonProperty("from") val from: GraphRecipient? = null,
+    // No `from`: the sender comes from the /users/{mailbox} path on every call, so the field was
+    // never populated and Graph would reject a value that disagreed with the path anyway.
 )
 
 data class GraphBody(

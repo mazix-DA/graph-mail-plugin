@@ -8,6 +8,7 @@ import java.net.ProxySelector
 import java.net.URI
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 /**
  * The JDK's HttpClient installs no ProxySelector unless one is passed in — not even when
@@ -128,6 +129,72 @@ class ProxyConfigurationTest {
     fun `a proxy host with a scheme is rejected`() {
         assertThrows<IllegalArgumentException> {
             GraphMailHttpProperties(proxyHost = "http://proxy.intern.example.nl", proxyPort = 8080)
+        }
+    }
+
+    @Test
+    fun `a proxy host with the port glued on is rejected`() {
+        // Clears the scheme and path checks, then produces an InetSocketAddress whose hostname
+        // contains a colon — a DNS failure at connect time instead of a readable startup error.
+        assertThrows<IllegalArgumentException> {
+            GraphMailHttpProperties(proxyHost = "proxy.intern.example.nl:8080", proxyPort = 8080)
+        }
+    }
+
+    @Test
+    fun `a comma-separated bypass list is rejected instead of silently matching nothing`() {
+        // http.nonProxyHosts is pipe-separated. A comma ends up inside the pattern, so the entry
+        // never matches and intranet traffic goes through the proxy while the configuration reads
+        // as though it does not.
+        assertThrows<IllegalArgumentException> {
+            GraphMailHttpProperties(
+                proxyHost = "proxy.intern.example.nl",
+                proxyPort = 8080,
+                nonProxyHosts = "localhost,*.intern.example.nl",
+            )
+        }
+    }
+
+    @Test
+    fun `a bypass list without a configured proxy is rejected instead of ignored`() {
+        assertThrows<IllegalArgumentException> {
+            GraphMailHttpProperties(nonProxyHosts = "localhost")
+        }
+    }
+
+    @Test
+    fun `whitespace around bypass entries is still accepted`() {
+        // BypassingProxySelector trims each entry, so this has always worked; only whitespace
+        // *inside* an entry is a mistake.
+        val selector =
+            selectorFor(
+                GraphMailHttpProperties(
+                    proxyHost = "proxy.intern.example.nl",
+                    proxyPort = 8080,
+                    nonProxyHosts = "localhost | *.intern.example.nl",
+                ),
+            )
+
+        assertEquals(
+            Proxy.NO_PROXY,
+            selector.select(URI.create("https://mail.intern.example.nl/x")).single(),
+        )
+    }
+
+    @Test
+    fun `the client still builds when the JVM has no default proxy selector at all`() {
+        // ProxySelector.setDefault(null) is a public API and this plugin runs inside somebody
+        // else's application. Passing the resulting null to HttpClient.Builder.proxy() throws,
+        // which would fail bean creation and stop the whole application from starting.
+        val previous = ProxySelector.getDefault()
+        try {
+            ProxySelector.setDefault(null)
+
+            val client = GraphMailAutoConfiguration().graphHttpClient(GraphMailHttpProperties())
+
+            assertTrue(client.proxy().isPresent, "the client was built without a ProxySelector")
+        } finally {
+            ProxySelector.setDefault(previous)
         }
     }
 

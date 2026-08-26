@@ -33,7 +33,22 @@ class AttachmentConcurrencyLimiter(
         if (!hasAttachments) return block()
 
         val waitStart = System.currentTimeMillis()
-        if (!semaphore.tryAcquire(acquireTimeoutMs, TimeUnit.MILLISECONDS)) {
+        val acquired =
+            try {
+                semaphore.tryAcquire(acquireTimeoutMs, TimeUnit.MILLISECONDS)
+            } catch (ex: InterruptedException) {
+                // Restore the flag the catch just cleared. An engine shutting down interrupts its
+                // job-executor threads, and swallowing that leaves the rest of the shutdown path
+                // unable to see it — while letting a raw InterruptedException escape surfaces as an
+                // UNCLASSIFIED verdict and a stack trace, rather than the transient this is.
+                Thread.currentThread().interrupt()
+                throw GraphMailRetryableException(
+                    "Interrupted while waiting for an attachment send slot — the application is " +
+                        "most likely shutting down. The job executor will retry.",
+                    ex,
+                )
+            }
+        if (!acquired) {
             // Retryable on purpose: the engine reschedules this without holding a thread, which is
             // precisely the behaviour that makes the cap safe to enforce.
             throw GraphMailRetryableException(

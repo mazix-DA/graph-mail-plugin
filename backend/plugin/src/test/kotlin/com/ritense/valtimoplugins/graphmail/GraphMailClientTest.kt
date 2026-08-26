@@ -24,6 +24,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.containing
 import com.github.tomakehurst.wiremock.client.WireMock.delete
 import com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
+import com.github.tomakehurst.wiremock.client.WireMock.matching
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.post
 import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
@@ -42,6 +43,9 @@ import org.junit.jupiter.api.Test
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
+import java.net.InetSocketAddress
+import java.net.ProxySelector
+import java.net.ServerSocket
 import java.net.http.HttpClient
 import java.time.Duration
 
@@ -523,6 +527,88 @@ class GraphMailClientTest {
         sendBasic()
 
         wireMock.verify(2, postRequestedFor(urlPathMatching(mailPath)))
+    }
+
+    @Test fun `a tenantId that would reshape the token request is rejected`() {
+        // tenantId is interpolated into the token URL path. Entra accepts a GUID, a verified
+        // domain and the 'common'/'organizations' aliases, so a strict UUID check would break
+        // working configurations — but a value carrying a path or query separator is not a tenant
+        // identifier at all, and used to surface only as a bare 400 blaming the credentials.
+        listOf("tenant/../evil", "tenant?x=1", "tenant#frag", "", "  ").forEach { bad ->
+            assertThrows(IllegalArgumentException::class.java, {
+                client.getAccessToken(GraphCredentials(bad, "c", "s"))
+            }, "'$bad' should not be accepted as a tenantId")
+        }
+    }
+
+    @Test fun `the shapes Entra actually accepts still work as a tenantId`() {
+        stubToken()
+        listOf(
+            "72f988bf-86f1-41af-91ab-2d7cd011db47",
+            "contoso.onmicrosoft.com",
+            "common",
+            "organizations",
+        ).forEach { good ->
+            client.getAccessToken(GraphCredentials(good, "c", "s"))
+        }
+    }
+
+    @Test fun `every Graph request carries a client-request-id`() {
+        // Microsoft Support asks for this first when investigating a message that never arrived.
+        // Before this the plugin sent nothing correlatable at all.
+        stubToken()
+        wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
+
+        sendBasic()
+
+        wireMock.verify(
+            1,
+            postRequestedFor(urlPathMatching(mailPath))
+                .withHeader("client-request-id", matching("[0-9a-f-]{36}")),
+        )
+    }
+
+    @Test fun `a rejected send reports both correlation ids`() {
+        // The ids have to survive into the exception message, because that is what ends up in the
+        // SEND_FAIL audit line — the place an administrator looks before opening a support case.
+        stubToken()
+        wireMock.stubFor(
+            post(urlPathMatching(mailPath))
+                .willReturn(
+                    aResponse()
+                        .withStatus(403)
+                        .withHeader("request-id", "graph-side-id-42"),
+                ),
+        )
+
+        val ex = assertThrows(GraphMailException::class.java) { sendBasic() }
+
+        assertTrue(
+            ex.message!!.contains("graph-request-id=graph-side-id-42"),
+            "Graph's own request id is missing from the message: ${ex.message}",
+        )
+        assertTrue(
+            ex.message!!.contains("client-request-id="),
+            "our client-request-id is missing from the message: ${ex.message}",
+        )
+    }
+
+    @Test fun `a retry sends a fresh client-request-id`() {
+        // A retry is a separate request on Microsoft's side too, so reusing one id would make two
+        // distinct attempts indistinguishable in their logs.
+        stubToken()
+        wireMock.stubFor(
+            post(urlPathMatching(mailPath))
+                .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")),
+        )
+
+        assertThrows(GraphMailException::class.java) { sendBasic() }
+
+        val ids =
+            wireMock
+                .findAll(postRequestedFor(urlPathMatching(mailPath)))
+                .map { it.getHeader("client-request-id") }
+        assertEquals(ids.size, ids.toSet().size, "attempts reused a client-request-id: $ids")
     }
 
     @Test fun `empty recipients throws IllegalArgumentException`() {
@@ -1066,6 +1152,44 @@ class GraphMailClientTest {
         wireMock.verify(0, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
     }
 
+    @Test fun `a draft send that is throttled out of attempts deletes the draft`() {
+        // A 429 that exhausts the attempt limit means the send never happened, and the engine will
+        // re-run the whole activity and build a fresh draft. Leaving this one behind piles orphans
+        // up in a functional mailbox — with an R5/PT2M retry cycle, five per failing send.
+        // Distinct from the UNKNOWN case above, where the message may already be in Sent Items.
+        stubToken()
+        stubDraftCreate()
+        stubUploadSession("${wireMock.baseUrl()}/upload/s1")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        wireMock.stubFor(
+            post(urlPathMatching(sendDraftPath))
+                .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")),
+        )
+        wireMock.stubFor(delete(anyUrl()).willReturn(aResponse().withStatus(204)))
+
+        val ex = assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        assertTrue(
+            ex is GraphMailRetryableException,
+            "expected retryable, got ${ex::class.simpleName}",
+        )
+        wireMock.verify(1, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
+    }
+
+    @Test fun `a permanently rejected draft send deletes the draft`() {
+        // Same reasoning: a 403 means nothing was sent, so the draft is an orphan either way.
+        stubToken()
+        stubDraftCreate()
+        stubUploadSession("${wireMock.baseUrl()}/upload/s1")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+        wireMock.stubFor(post(urlPathMatching(sendDraftPath)).willReturn(aResponse().withStatus(403)))
+        wireMock.stubFor(delete(anyUrl()).willReturn(aResponse().withStatus(204)))
+
+        assertThrows(GraphMailException::class.java) { sendLarge() }
+
+        wireMock.verify(1, deleteRequestedFor(urlPathMatching(".*/messages/draft-1")))
+    }
+
     @Test fun `a failed attachment upload does delete the orphaned draft`() {
         stubToken()
         stubDraftCreate()
@@ -1136,6 +1260,104 @@ class GraphMailClientTest {
             ex.message!!.contains(mailbox),
             "sender mailbox leaked into the exception message: ${ex.message}",
         )
+    }
+
+    @Test fun `a proxy demanding authentication is permanent, not retried forever`() {
+        // Runs against a real socket speaking a real 407 to a real CONNECT, because the point of
+        // this test is what the shipped stack actually does — not what we assume it does. It
+        // settled a wrong assumption once already: java.net.http.HttpClient surfaces a refused
+        // CONNECT as an ordinary 407 *response*, not as the "Unable to tunnel through proxy"
+        // IOException that HttpURLConnection used to throw.
+        //
+        // 407 was absent from PERMANENT_CLIENT_ERROR_STATUSES, so it landed in the "possibly
+        // transient" bucket: the job executor retried a proxy that will refuse every single
+        // attempt identically until someone changes configuration, and the operator saw a
+        // network-shaped error pointing at Graph rather than at the proxy.
+        stubToken()
+        ServerSocket(0).use { fakeProxy ->
+            val accepting =
+                Thread {
+                    runCatching {
+                        while (!fakeProxy.isClosed) {
+                            fakeProxy.accept().use { socket ->
+                                socket.getInputStream().read(ByteArray(4096))
+                                socket.getOutputStream().write(
+                                    (
+                                        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+                                            "Proxy-Authenticate: Basic realm=\"corp\"\r\n" +
+                                            "Content-Length: 0\r\n\r\n"
+                                    ).toByteArray(),
+                                )
+                                socket.getOutputStream().flush()
+                            }
+                        }
+                    }
+                }.apply {
+                    isDaemon = true
+                    start()
+                }
+
+            val throughProxy =
+                GraphMailClientImpl(
+                    restClient =
+                        RestClient
+                            .builder()
+                            .requestFactory(
+                                JdkClientHttpRequestFactory(
+                                    HttpClient
+                                        .newBuilder()
+                                        .connectTimeout(Duration.ofSeconds(2))
+                                        .version(HttpClient.Version.HTTP_1_1)
+                                        .proxy(
+                                            // The token endpoint is WireMock on loopback and must
+                                            // go direct. Route it through the fake proxy too and it
+                                            // is the *token* call that fails first, with a plain
+                                            // 407 response rather than a refused tunnel — the test
+                                            // would then pass without ever exercising this branch.
+                                            BypassingProxySelector(
+                                                ProxySelector.of(
+                                                    InetSocketAddress("127.0.0.1", fakeProxy.localPort),
+                                                ),
+                                                "localhost|127.0.0.1",
+                                            ),
+                                        ).build(),
+                                ).apply { setReadTimeout(Duration.ofSeconds(2)) },
+                            ).build(),
+                    tokenBaseUrl = wireMock.baseUrl(),
+                    // https, so the proxy has to be asked for a CONNECT tunnel first.
+                    graphBaseUrl = "https://graph.microsoft.com",
+                    requireMicrosoftUploadHost = false,
+                )
+
+            val ex =
+                assertThrows(GraphMailException::class.java) {
+                    throughProxy.sendMail(
+                        credentials(),
+                        OutboundMail(
+                            senderMailbox = mailbox,
+                            toRecipients = recipients("jan@test.nl"),
+                            subject = "Test",
+                            bodyHtml = "<p>Test</p>",
+                        ),
+                    )
+                }
+
+            accepting.interrupt()
+
+            assertTrue(
+                ex is GraphMailPermanentException,
+                "expected permanent, got ${ex::class.simpleName}: ${ex.message}",
+            )
+            assertFalse(
+                ex is GraphMailRetryableException,
+                "a proxy that demands credentials this client cannot supply will refuse every " +
+                    "retry identically — retrying is burning the job executor's budget",
+            )
+            assertTrue(
+                ex.message!!.contains("proxy", ignoreCase = true),
+                "the message should point at the proxy, not at Graph: ${ex.message}",
+            )
+        }
     }
 
     @Test fun `a connection that never reaches Graph is retryable, not unknown`() {

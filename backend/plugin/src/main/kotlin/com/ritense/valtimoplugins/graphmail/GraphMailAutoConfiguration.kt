@@ -5,8 +5,10 @@ import com.ritense.plugin.repository.PluginConfigurationRepository
 import com.ritense.plugin.service.PluginService
 import com.ritense.resource.service.TemporaryResourceStorageService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.event.ApplicationReadyEvent
@@ -20,7 +22,9 @@ import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
 import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.ProxySelector
+import java.net.URI
 import java.net.http.HttpClient
 import java.time.Duration
 
@@ -94,8 +98,10 @@ class GraphMailAutoConfiguration {
     // Extracted so a test can assert on the client itself: the regression this guards against was a
     // missing ProxySelector, and that is only visible on the HttpClient — not on the RestClient
     // built around it.
-    internal fun graphHttpClient(properties: GraphMailHttpProperties): HttpClient =
-        HttpClient
+    internal fun graphHttpClient(properties: GraphMailHttpProperties): HttpClient {
+        val proxySelector = proxySelectorFor(properties)
+        logProxyInUse(proxySelector, properties)
+        return HttpClient
             .newBuilder()
             .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
             .followRedirects(HttpClient.Redirect.NEVER)
@@ -111,35 +117,62 @@ class GraphMailAutoConfiguration {
             // transient: the job executor then retries forever on something that can never succeed.
             // The RestTemplate this replaced went through HttpURLConnection, which honoured those
             // JVM properties, so leaving it out was a silent regression.
-            .proxy(proxySelectorFor(properties))
+            .proxy(proxySelector)
             .build()
+    }
 
     // An explicitly configured proxy wins; otherwise fall back to whatever the JVM already knows.
-    // Logged either way: a proxy that is silently absent, or silently different from what the
-    // operator intended, is indistinguishable from a network outage in the logs.
     internal fun proxySelectorFor(properties: GraphMailHttpProperties): ProxySelector {
         val host = properties.proxyHost
         if (host == null) {
-            val fromJvm = System.getProperty("https.proxyHost")
-            if (fromJvm == null) {
-                logger.info("[Graph Mail Plugin] No outbound proxy configured; connecting to Graph directly.")
-            } else {
-                logger.info(
-                    "[Graph Mail Plugin] Using the JVM's proxy settings for Graph traffic ({}:{}). " +
-                        "Set graph-mail.http.proxy-host to override.",
-                    fromJvm,
-                    System.getProperty("https.proxyPort") ?: "(default)",
-                )
-            }
-            return ProxySelector.getDefault()
+            // ProxySelector.getDefault() is nullable — ProxySelector.setDefault(null) is a public
+            // API, and this plugin runs inside somebody else's application. Passing null to
+            // HttpClient.Builder.proxy() throws, which fails bean creation and stops the whole
+            // application from starting over a proxy setting.
+            return ProxySelector.getDefault() ?: HttpClient.Builder.NO_PROXY
         }
 
         // proxyPort is guaranteed non-null here: GraphMailHttpProperties rejects a host without one.
         val port = requireNotNull(properties.proxyPort)
-        logger.info("[Graph Mail Plugin] Using configured proxy for Graph traffic: {}:{}", host, port)
         val proxy = ProxySelector.of(InetSocketAddress.createUnresolved(host, port))
         val bypass = properties.nonProxyHosts
         return if (bypass.isNullOrBlank()) proxy else BypassingProxySelector(proxy, bypass)
+    }
+
+    // Logged because a proxy that is silently absent, or silently different from what the operator
+    // intended, is indistinguishable from a network outage in the logs — and documentation/plugin.md
+    // sends administrators here first when sends fail at connect.
+    //
+    // Asks the selector what it would actually do with the Graph endpoint, rather than reading
+    // https.proxyHost back out of the system properties. Those two can disagree: the host
+    // application may have installed its own ProxySelector.setDefault(...), or set only
+    // http.proxyHost. A diagnostic line that reports "no proxy" while the client is in fact
+    // proxying sends the reader somewhere else entirely, which is worse than printing nothing.
+    private fun logProxyInUse(
+        selector: ProxySelector,
+        properties: GraphMailHttpProperties,
+    ) {
+        val resolved =
+            runCatching {
+                selector
+                    .select(URI.create(properties.graphBaseUrl))
+                    .firstOrNull { it.type() != Proxy.Type.DIRECT }
+            }.getOrNull()
+
+        val source = if (properties.proxyHost != null) "graph-mail.http.proxy-host" else "the JVM's proxy settings"
+        if (resolved == null) {
+            logger.info(
+                "[Graph Mail Plugin] No outbound proxy for {}; connecting to Graph directly.",
+                properties.graphBaseUrl,
+            )
+        } else {
+            logger.info(
+                "[Graph Mail Plugin] Graph traffic to {} goes through proxy {} (from {}).",
+                properties.graphBaseUrl,
+                resolved.address(),
+                source,
+            )
+        }
     }
 
     // Requires the client secret to be re-entered whenever the sender allowlist changes — the
@@ -174,6 +207,14 @@ class GraphMailAutoConfiguration {
     fun graphMailGuardStartupCheck(pluginService: PluginService): GraphMailGuardStartupCheck =
         GraphMailGuardStartupCheck(pluginService)
 
+    // Registered as its own bean rather than a listener on this class, mirroring
+    // GraphMailGuardStartupCheck: this class is instantiated directly in tests and must stay
+    // no-arg. See the class doc for why a loud line, and not a refusal to start.
+    @Bean
+    @ConditionalOnMissingBean(GraphMailEndpointAllowlistWarning::class)
+    fun graphMailEndpointAllowlistWarning(properties: GraphMailHttpProperties): GraphMailEndpointAllowlistWarning =
+        GraphMailEndpointAllowlistWarning(properties)
+
     // Single shared instance — see GraphTokenCache's class doc for why the cache must be a
     // bean rather than something each GraphMailClientImpl owns: Valtimo hydrates a fresh
     // GraphMailPlugin per action invocation, so an instance-owned cache never accumulated hits.
@@ -185,9 +226,19 @@ class GraphMailAutoConfiguration {
     // GraphMailPlugin per action invocation means an instance-owned guard would never see the
     // marker left by an earlier attempt of the same activity. See SendIdempotencyGuard's class
     // doc for what failure mode this does and does not protect against.
+    // Where "already sent" is remembered. The default is in-memory and therefore per-JVM: on a
+    // multi-node GZAC a retry picked up by another node has never heard of the marker, so the guard
+    // offers no protection there. Registering it separately means a deployment that needs the
+    // guarantee can supply a durable store — one committing outside the surrounding transaction —
+    // without replacing the guard's locking and eviction as well. See SentMarkerStore.
+    @Bean
+    @ConditionalOnMissingBean(SentMarkerStore::class)
+    fun sentMarkerStore(): SentMarkerStore = InMemorySentMarkerStore()
+
     @Bean
     @ConditionalOnMissingBean(SendIdempotencyGuard::class)
-    fun sendIdempotencyGuard(): SendIdempotencyGuard = SendIdempotencyGuard()
+    fun sendIdempotencyGuard(sentMarkerStore: SentMarkerStore): SendIdempotencyGuard =
+        SendIdempotencyGuard(sentMarkerStore)
 
     // Must be a single instance to mean anything — a per-invocation limiter would hand every
     // caller its own full set of permits and cap nothing at all.
@@ -218,6 +269,30 @@ class GraphMailAutoConfiguration {
             requireMicrosoftUploadHost = properties.isProductionGraphEndpoint(),
         )
 
+    // ObjectProvider rather than a nullable parameter: it resolves lazily and to nothing at all
+    // when Micrometer is absent, which is exactly the "metrics are optional" contract. The
+    // @ConditionalOnClass guard is what keeps this method from being loaded at all in that case —
+    // its signature mentions MeterRegistry, and a missing class on a bean method signature is a
+    // NoClassDefFoundError at context startup, not a quietly skipped bean.
+    @Bean
+    @ConditionalOnClass(io.micrometer.core.instrument.MeterRegistry::class)
+    @ConditionalOnMissingBean(GraphMailMetrics::class)
+    fun graphMailMetrics(
+        meterRegistry: ObjectProvider<io.micrometer.core.instrument.MeterRegistry>,
+        attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter,
+        graphTokenCache: GraphTokenCache,
+    ): GraphMailMetrics =
+        GraphMailMetrics(meterRegistry.getIfAvailable()).also {
+            it.bindAttachmentLimiter(attachmentConcurrencyLimiter)
+            it.bindTokenCache(graphTokenCache)
+        }
+
+    // The fallback for a host application without Micrometer on the classpath. Every method on it
+    // is a no-op, so the plugin behaves identically minus the meters.
+    @Bean
+    @ConditionalOnMissingBean(GraphMailMetrics::class)
+    fun graphMailMetricsDisabled(): GraphMailMetrics = GraphMailMetrics(null)
+
     @Bean
     @ConditionalOnMissingBean(GraphMailPluginFactory::class)
     fun graphMailPluginFactory(
@@ -227,6 +302,7 @@ class GraphMailAutoConfiguration {
         eventPublisher: ApplicationEventPublisher,
         sendIdempotencyGuard: SendIdempotencyGuard,
         attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter,
+        metrics: GraphMailMetrics,
     ): GraphMailPluginFactory =
         GraphMailPluginFactory(
             pluginService,
@@ -235,6 +311,7 @@ class GraphMailAutoConfiguration {
             eventPublisher,
             sendIdempotencyGuard,
             attachmentConcurrencyLimiter,
+            metrics,
         )
 
     @Bean

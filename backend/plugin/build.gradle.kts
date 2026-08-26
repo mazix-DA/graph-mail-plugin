@@ -57,6 +57,10 @@ dependencies {
     // plugin's usage was not exploitable — pinned to the patched version regardless, since
     // this is the library the plugin's HTML sanitization relies on.
     implementation("org.jsoup:jsoup:1.23.1")
+    // Metrics are optional: compileOnly plus @ConditionalOnClass, so the plugin still starts in an
+    // application that has no Micrometer on the classpath. GZAC ships Actuator, so in practice the
+    // meters are there — but the plugin must not be the reason a leaner host application fails.
+    compileOnly("io.micrometer:micrometer-core")
 
     // Testing
     testImplementation("com.ritense.valtimo:plugin-valtimo")
@@ -81,6 +85,7 @@ dependencies {
     // ActivityInstanceIdContractTest runs a real Operaton engine in-process on H2 to verify the
     // assumption the duplicate guard is built on. No Postgres, no docker, no Spring.
     testImplementation("com.h2database:h2")
+    testImplementation("io.micrometer:micrometer-core")
 }
 
 apply(from = "gradle/publishing.gradle")
