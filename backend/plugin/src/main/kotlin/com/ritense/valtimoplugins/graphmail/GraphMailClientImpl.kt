@@ -104,7 +104,19 @@ private class WaitBudget(
             )
         }
         spentMs += requestedMs
-        Thread.sleep(requestedMs)
+        try {
+            Thread.sleep(requestedMs)
+        } catch (ex: InterruptedException) {
+            // Same reasoning as AttachmentConcurrencyLimiter: catching an interrupt clears the
+            // flag, so restore it before converting. A shutdown interrupting a backoff is a
+            // transient, not the UNCLASSIFIED verdict a bare InterruptedException produces.
+            Thread.currentThread().interrupt()
+            throw GraphMailRetryableException(
+                "Interrupted while waiting to retry ($what) — the application is most likely " +
+                    "shutting down. The job executor will retry.",
+                ex,
+            )
+        }
     }
 }
 
