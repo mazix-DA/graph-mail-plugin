@@ -389,6 +389,68 @@ class GraphMailPluginTest {
         assertEquals("doc.pdf", captor.firstValue.attachments[0].name)
     }
 
+    @Test fun `a file name with CRLF is rejected like every other header-bearing field`() {
+        // Resource metadata is externally influenced — an uploaded file names itself — and this
+        // name reaches both the Graph payload and the audit log. Every other such string in this
+        // plugin already goes through requireNoControlChars.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "invoice\r\nBcc: attacker@evil.nl.pdf", "contentType" to "application/pdf"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        assertThrows<IllegalArgumentException> { send(attachments = VALID_UUID) }
+    }
+
+    @Test fun `an over-long file name is trimmed but keeps its extension`() {
+        // Graph rejects a name over 255 characters, but there the failure arrives as an opaque 400
+        // halfway through a send. Losing the extension would leave the recipient an unopenable
+        // blob, so the trim keeps it.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "a".repeat(400) + ".pdf", "contentType" to "application/pdf"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        val name = captor.firstValue.attachments[0].name
+        assertTrue(name.length <= 255, "name is still ${name.length} characters")
+        assertTrue(name.endsWith(".pdf"), "the extension was lost: $name")
+    }
+
+    @Test fun `an unusable content type falls back instead of failing the send`() {
+        // The content type is metadata about the file, not the file. Refusing to send over it
+        // would fail a message whose content is perfectly fine.
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "doc.pdf", "contentType" to "not a content type at all"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        assertEquals("application/octet-stream", captor.firstValue.attachments[0].contentType)
+    }
+
+    @Test fun `a content type with parameters is left alone`() {
+        whenever(storage.getResourceMetadata(VALID_UUID)).thenReturn(
+            mapOf("fileName" to "doc.csv", "contentType" to "text/csv; charset=utf-8"),
+        )
+        whenever(storage.getResourceContentAsInputStream(VALID_UUID))
+            .thenReturn(ByteArrayInputStream("data".toByteArray()))
+
+        val captor = argumentCaptor<OutboundMail>()
+        send(attachments = VALID_UUID)
+        verify(mailClient).sendMail(any(), captor.capture())
+
+        assertEquals("text/csv; charset=utf-8", captor.firstValue.attachments[0].contentType)
+    }
+
     @Test fun `empty attachments when ids null`() {
         val captor = argumentCaptor<OutboundMail>()
         send()

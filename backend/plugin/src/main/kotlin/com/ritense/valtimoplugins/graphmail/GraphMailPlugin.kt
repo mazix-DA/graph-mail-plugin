@@ -110,6 +110,47 @@ internal fun parseStringListParam(value: String?): List<String> {
     return trimmed.split(",").map { it.trim() }.filter { it.isNotBlank() }
 }
 
+// Graph's own limit for an attachment name. A longer name is rejected by Graph anyway, but there
+// the failure arrives as an opaque 400 halfway through a send.
+private const val MAX_ATTACHMENT_NAME_LENGTH = 255
+
+// A bare `type/subtype`, optionally with parameters. Deliberately permissive about the parameters
+// (charset, boundary) and strict about the shape.
+private val CONTENT_TYPE_REGEX = Regex("""^[a-zA-Z0-9!#$%&'*+.^_`|~-]+/[a-zA-Z0-9!#$%&'*+.^_`|~-]+(\s*;.*)?$""")
+
+private const val DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+private val attachmentLogger = LoggerFactory.getLogger("com.ritense.valtimoplugins.graphmail.AttachmentMetadata")
+
+// A file name reaches the Graph payload and the audit log. Reject what cannot be a file name;
+// trim what is merely too long rather than failing a send over it.
+private fun sanitizeAttachmentFileName(raw: String): String {
+    requireNoControlChars(raw, "attachment fileName")
+    val trimmed = raw.trim()
+    require(trimmed.isNotBlank()) { "Attachment fileName must not be blank" }
+    if (trimmed.length <= MAX_ATTACHMENT_NAME_LENGTH) return trimmed
+    // Keep the extension: mail clients pick their handler from it, and a truncated name without
+    // one arrives as an unopenable blob.
+    val extension = trimmed.substringAfterLast('.', "").take(10)
+    val keep = MAX_ATTACHMENT_NAME_LENGTH - extension.length - 1
+    return if (extension.isEmpty()) trimmed.take(MAX_ATTACHMENT_NAME_LENGTH) else "${trimmed.take(keep)}.$extension"
+}
+
+// An unusable content type is replaced rather than rejected: it is metadata about the file, not
+// the file, and refusing to send over it would fail a message whose content is perfectly fine.
+private fun sanitizeContentType(raw: String?): String {
+    val candidate = raw?.trim().orEmpty()
+    if (candidate.isEmpty()) return DEFAULT_CONTENT_TYPE
+    if (containsControlChars(candidate) || !CONTENT_TYPE_REGEX.matches(candidate)) {
+        attachmentLogger.warn(
+            "Ignoring an unusable attachment content type from resource metadata; falling back to {}",
+            DEFAULT_CONTENT_TYPE,
+        )
+        return DEFAULT_CONTENT_TYPE
+    }
+    return candidate
+}
+
 private fun parseRecipients(
     values: List<String>,
     fieldName: String,
@@ -479,8 +520,13 @@ class GraphMailPlugin(
             }
 
             val metadata = resourceStorageService.getResourceMetadata(resourceId)
-            val fileName = metadata["fileName"] as? String ?: resourceId
-            val contentType = metadata["contentType"] as? String ?: "application/octet-stream"
+            // Both values come from resource metadata, which is externally influenced (an uploaded
+            // file names itself). Every other such string in this plugin goes through
+            // requireNoControlChars and a length bound; these two did not. Graph JSON-escapes them
+            // either way, so the exposure was log injection and confusing Graph errors rather than
+            // anything worse — but the gap in an otherwise consistent rule is the point.
+            val fileName = sanitizeAttachmentFileName(metadata["fileName"] as? String ?: resourceId)
+            val contentType = sanitizeContentType(metadata["contentType"] as? String)
 
             val raw =
                 resourceStorageService.getResourceContentAsInputStream(resourceId)
