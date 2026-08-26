@@ -61,7 +61,9 @@ private const val MAX_CAUSE_DEPTH = 10
 // 4xx statuses that no amount of retrying will change: they need a configuration, permission or
 // input fix first. Everything else in the 4xx range is treated as possibly transient so the job
 // executor keeps its normal retry behaviour.
-private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 409, 413, 422)
+// 407 is in here because it is never Graph talking: it is the egress proxy demanding credentials
+// this client cannot supply (no Authenticator is configured). Retrying repeats it identically.
+private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 407, 409, 413, 422)
 
 // Hosts Graph legitimately hands back for an attachment upload session.
 private val MICROSOFT_UPLOAD_HOST_SUFFIXES =
@@ -594,6 +596,11 @@ class GraphMailClientImpl(
             400 ->
                 "Graph rejected the request payload — check the sender mailbox, recipient addresses " +
                     "and subject for values Graph considers malformed."
+            407 ->
+                "The outbound proxy demands authentication and this client cannot supply it — the " +
+                    "JDK HTTP client is built without an Authenticator. Point " +
+                    "graph-mail.http.proxy-host at a proxy that does not require credentials for " +
+                    "the Microsoft endpoints, or allow those endpoints through unauthenticated."
             403 ->
                 "Access denied — grant $permissionHint as an *application* permission on the Azure app " +
                     "registration and give it admin consent. If the permission is already granted, check " +

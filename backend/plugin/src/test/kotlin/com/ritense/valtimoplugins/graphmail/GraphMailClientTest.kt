@@ -42,6 +42,9 @@ import org.junit.jupiter.api.Test
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
+import java.net.InetSocketAddress
+import java.net.ProxySelector
+import java.net.ServerSocket
 import java.net.http.HttpClient
 import java.time.Duration
 
@@ -1136,6 +1139,104 @@ class GraphMailClientTest {
             ex.message!!.contains(mailbox),
             "sender mailbox leaked into the exception message: ${ex.message}",
         )
+    }
+
+    @Test fun `a proxy demanding authentication is permanent, not retried forever`() {
+        // Runs against a real socket speaking a real 407 to a real CONNECT, because the point of
+        // this test is what the shipped stack actually does — not what we assume it does. It
+        // settled a wrong assumption once already: java.net.http.HttpClient surfaces a refused
+        // CONNECT as an ordinary 407 *response*, not as the "Unable to tunnel through proxy"
+        // IOException that HttpURLConnection used to throw.
+        //
+        // 407 was absent from PERMANENT_CLIENT_ERROR_STATUSES, so it landed in the "possibly
+        // transient" bucket: the job executor retried a proxy that will refuse every single
+        // attempt identically until someone changes configuration, and the operator saw a
+        // network-shaped error pointing at Graph rather than at the proxy.
+        stubToken()
+        ServerSocket(0).use { fakeProxy ->
+            val accepting =
+                Thread {
+                    runCatching {
+                        while (!fakeProxy.isClosed) {
+                            fakeProxy.accept().use { socket ->
+                                socket.getInputStream().read(ByteArray(4096))
+                                socket.getOutputStream().write(
+                                    (
+                                        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+                                            "Proxy-Authenticate: Basic realm=\"corp\"\r\n" +
+                                            "Content-Length: 0\r\n\r\n"
+                                    ).toByteArray(),
+                                )
+                                socket.getOutputStream().flush()
+                            }
+                        }
+                    }
+                }.apply {
+                    isDaemon = true
+                    start()
+                }
+
+            val throughProxy =
+                GraphMailClientImpl(
+                    restClient =
+                        RestClient
+                            .builder()
+                            .requestFactory(
+                                JdkClientHttpRequestFactory(
+                                    HttpClient
+                                        .newBuilder()
+                                        .connectTimeout(Duration.ofSeconds(2))
+                                        .version(HttpClient.Version.HTTP_1_1)
+                                        .proxy(
+                                            // The token endpoint is WireMock on loopback and must
+                                            // go direct. Route it through the fake proxy too and it
+                                            // is the *token* call that fails first, with a plain
+                                            // 407 response rather than a refused tunnel — the test
+                                            // would then pass without ever exercising this branch.
+                                            BypassingProxySelector(
+                                                ProxySelector.of(
+                                                    InetSocketAddress("127.0.0.1", fakeProxy.localPort),
+                                                ),
+                                                "localhost|127.0.0.1",
+                                            ),
+                                        ).build(),
+                                ).apply { setReadTimeout(Duration.ofSeconds(2)) },
+                            ).build(),
+                    tokenBaseUrl = wireMock.baseUrl(),
+                    // https, so the proxy has to be asked for a CONNECT tunnel first.
+                    graphBaseUrl = "https://graph.microsoft.com",
+                    requireMicrosoftUploadHost = false,
+                )
+
+            val ex =
+                assertThrows(GraphMailException::class.java) {
+                    throughProxy.sendMail(
+                        credentials(),
+                        OutboundMail(
+                            senderMailbox = mailbox,
+                            toRecipients = recipients("jan@test.nl"),
+                            subject = "Test",
+                            bodyHtml = "<p>Test</p>",
+                        ),
+                    )
+                }
+
+            accepting.interrupt()
+
+            assertTrue(
+                ex is GraphMailPermanentException,
+                "expected permanent, got ${ex::class.simpleName}: ${ex.message}",
+            )
+            assertFalse(
+                ex is GraphMailRetryableException,
+                "a proxy that demands credentials this client cannot supply will refuse every " +
+                    "retry identically — retrying is burning the job executor's budget",
+            )
+            assertTrue(
+                ex.message!!.contains("proxy", ignoreCase = true),
+                "the message should point at the proxy, not at Graph: ${ex.message}",
+            )
+        }
     }
 
     @Test fun `a connection that never reaches Graph is retryable, not unknown`() {
