@@ -26,6 +26,10 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
 
 ### Opgelost
 
+- Achter een uitgaande proxy faalde elke verzending met een connectiefout, en de job-executor bleef
+  het eindeloos opnieuw proberen. De plugin gebruikt nu weer de proxy-instellingen van de JVM en
+  logt bij opstarten welke proxy in gebruik is. Een afwijkende proxy stel je in met
+  `graph-mail.http.proxy-host` en `proxy-port`.
 - Een loop over dezelfde service task verstuurde alleen de eerste e-mail. De rest werd stil
   overgeslagen terwijl het proces doorliep alsof er verstuurd was.
 - Bij een teruggedraaide transactie kon dezelfde mail alsnog twee keer uitgaan.
