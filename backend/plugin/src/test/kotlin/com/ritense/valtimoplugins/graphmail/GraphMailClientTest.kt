@@ -24,6 +24,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.containing
 import com.github.tomakehurst.wiremock.client.WireMock.delete
 import com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
+import com.github.tomakehurst.wiremock.client.WireMock.matching
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.post
 import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
@@ -526,6 +527,64 @@ class GraphMailClientTest {
         sendBasic()
 
         wireMock.verify(2, postRequestedFor(urlPathMatching(mailPath)))
+    }
+
+    @Test fun `every Graph request carries a client-request-id`() {
+        // Microsoft Support asks for this first when investigating a message that never arrived.
+        // Before this the plugin sent nothing correlatable at all.
+        stubToken()
+        wireMock.stubFor(post(urlPathMatching(mailPath)).willReturn(aResponse().withStatus(202)))
+
+        sendBasic()
+
+        wireMock.verify(
+            1,
+            postRequestedFor(urlPathMatching(mailPath))
+                .withHeader("client-request-id", matching("[0-9a-f-]{36}")),
+        )
+    }
+
+    @Test fun `a rejected send reports both correlation ids`() {
+        // The ids have to survive into the exception message, because that is what ends up in the
+        // SEND_FAIL audit line — the place an administrator looks before opening a support case.
+        stubToken()
+        wireMock.stubFor(
+            post(urlPathMatching(mailPath))
+                .willReturn(
+                    aResponse()
+                        .withStatus(403)
+                        .withHeader("request-id", "graph-side-id-42"),
+                ),
+        )
+
+        val ex = assertThrows(GraphMailException::class.java) { sendBasic() }
+
+        assertTrue(
+            ex.message!!.contains("graph-request-id=graph-side-id-42"),
+            "Graph's own request id is missing from the message: ${ex.message}",
+        )
+        assertTrue(
+            ex.message!!.contains("client-request-id="),
+            "our client-request-id is missing from the message: ${ex.message}",
+        )
+    }
+
+    @Test fun `a retry sends a fresh client-request-id`() {
+        // A retry is a separate request on Microsoft's side too, so reusing one id would make two
+        // distinct attempts indistinguishable in their logs.
+        stubToken()
+        wireMock.stubFor(
+            post(urlPathMatching(mailPath))
+                .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "0")),
+        )
+
+        assertThrows(GraphMailException::class.java) { sendBasic() }
+
+        val ids =
+            wireMock
+                .findAll(postRequestedFor(urlPathMatching(mailPath)))
+                .map { it.getHeader("client-request-id") }
+        assertEquals(ids.size, ids.toSet().size, "attempts reused a client-request-id: $ids")
     }
 
     @Test fun `empty recipients throws IllegalArgumentException`() {

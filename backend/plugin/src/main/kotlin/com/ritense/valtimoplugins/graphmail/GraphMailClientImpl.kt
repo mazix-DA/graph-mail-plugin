@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
+import java.util.UUID
 import kotlin.random.Random
 
 private const val TOKEN_EXPIRY_BUFFER_SECONDS = 60L
@@ -64,6 +65,12 @@ private const val MAX_CAUSE_DEPTH = 10
 // 407 is in here because it is never Graph talking: it is the egress proxy demanding credentials
 // this client cannot supply (no Authenticator is configured). Retrying repeats it identically.
 private val PERMANENT_CLIENT_ERROR_STATUSES = setOf(400, 403, 404, 405, 407, 409, 413, 422)
+
+// Graph echoes this back on the response and records it on its side. Microsoft Support asks for
+// these first when investigating "our mail never arrived", and without them a case is very hard to
+// substantiate — the plugin sent nothing correlatable at all before.
+private const val CLIENT_REQUEST_ID_HEADER = "client-request-id"
+private const val REQUEST_ID_HEADER = "request-id"
 
 // Hosts Graph legitimately hands back for an attachment upload session.
 private val MICROSOFT_UPLOAD_HOST_SUFFIXES =
@@ -417,7 +424,7 @@ class GraphMailClientImpl(
         // recipient a duplicate message when it lands wrong. Only set this for steps that are
         // provably repeatable: draft creation and upload-session creation.
         retryOnTransportError: Boolean,
-        request: (token: String) -> T,
+        request: (token: String, clientRequestId: String) -> T,
     ): T {
         var tokenRefreshed = false
         var forceFreshToken = false
@@ -439,8 +446,11 @@ class GraphMailClientImpl(
                 } else {
                     getAccessToken(credentials, deadline)
                 }
+            // A fresh id per attempt, not per call: Microsoft Support correlates on a single
+            // request, and a retry is a different request on their side too.
+            val clientRequestId = UUID.randomUUID().toString()
             try {
-                return request(token)
+                return request(token, clientRequestId)
             } catch (ex: HttpClientErrorException) {
                 when (ex.statusCode.value()) {
                     401 -> {
@@ -451,7 +461,8 @@ class GraphMailClientImpl(
                                 permissionHint,
                             )
                             throw GraphMailTokenExpiredException(
-                                "Token rejected during $actionLabel (401) even after refresh — check $permissionHint",
+                                "Token rejected during $actionLabel (401) even after refresh — check " +
+                                    "$permissionHint [${correlation(clientRequestId, ex.responseHeaders)}]",
                                 ex,
                             )
                         }
@@ -495,16 +506,21 @@ class GraphMailClientImpl(
                         val status = ex.statusCode.value()
                         val permanent = status in PERMANENT_CLIENT_ERROR_STATUSES
                         val remedy = remedyFor(status, permissionHint)
+                        val ids = correlation(clientRequestId, ex.responseHeaders)
                         logger.error(
-                            "Graph API rejected {} ({}) — {}: mailbox='{}'. {}",
+                            "Graph API rejected {} ({}) — {}: mailbox='{}' {}. {}",
                             actionLabel,
                             ex.statusCode,
                             if (permanent) "PERMANENT, not retried" else "possibly transient",
                             maskEmail(mailbox),
+                            ids,
                             remedy,
                         )
+                        // The ids ride along in the message so they survive into SEND_FAIL in the
+                        // audit log, which is where an administrator actually looks before opening
+                        // a case with Microsoft.
                         val message =
-                            "Graph API rejected $actionLabel (${ex.statusCode}). $remedy"
+                            "Graph API rejected $actionLabel (${ex.statusCode}). $remedy [$ids]"
                         throw if (permanent) {
                             GraphMailPermanentException(message, ex, statusCode = status)
                         } else {
@@ -521,7 +537,8 @@ class GraphMailClientImpl(
                         ex.statusCode,
                     )
                     throw GraphMailRetryableException(
-                        "Graph API unavailable during $actionLabel after $MAX_RETRIES attempts (${ex.statusCode})",
+                        "Graph API unavailable during $actionLabel after $MAX_RETRIES attempts " +
+                            "(${ex.statusCode}) [${correlation(clientRequestId, ex.responseHeaders)}]",
                         ex,
                         statusCode = ex.statusCode.value(),
                     )
@@ -596,6 +613,17 @@ class GraphMailClientImpl(
                 backoffMs = (backoffMs * BACKOFF_MULTIPLIER).toLong()
             }
         }
+    }
+
+    // The pair an administrator hands to Microsoft Support. Graph's own request-id comes back on
+    // the response (including on an error response); the client-request-id is the one we generated
+    // for this attempt. Neither contains PII, so neither is masked.
+    private fun correlation(
+        clientRequestId: String,
+        headers: HttpHeaders?,
+    ): String {
+        val graphRequestId = headers?.getFirst(REQUEST_ID_HEADER) ?: "(none)"
+        return "client-request-id=$clientRequestId graph-request-id=$graphRequestId"
     }
 
     // Turns a bare status code into something an administrator reading the GZAC logs can act on,
@@ -810,11 +838,12 @@ class GraphMailClientImpl(
             // Safe to retry: a duplicate draft is invisible to the recipient, and an orphan is
             // cleaned up by deleteDraftBestEffort.
             retryOnTransportError = true,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(uri)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(message)
                 .retrieve()
@@ -857,11 +886,12 @@ class GraphMailClientImpl(
                 permissionHint = "Mail.ReadWrite permission",
                 // Safe to retry: creating a second upload session has no user-visible effect.
                 retryOnTransportError = true,
-            ) { token ->
+            ) { token, clientRequestId ->
                 restClient
                     .post()
                     .uri(uri)
                     .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                    .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
@@ -1072,11 +1102,12 @@ class GraphMailClientImpl(
             permissionHint = "Mail.Send permission",
             // NOT safe to retry: the draft may already have been accepted for delivery.
             retryOnTransportError = false,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(uri)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentLength(0)
                 .retrieve()
                 .toBodilessEntity()
@@ -1099,11 +1130,12 @@ class GraphMailClientImpl(
             permissionHint = "Mail.Send permission",
             // NOT safe to retry: Graph may already have queued the message for delivery.
             retryOnTransportError = false,
-        ) { token ->
+        ) { token, clientRequestId ->
             restClient
                 .post()
                 .uri(url)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .header(CLIENT_REQUEST_ID_HEADER, clientRequestId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(payload)
                 .retrieve()
