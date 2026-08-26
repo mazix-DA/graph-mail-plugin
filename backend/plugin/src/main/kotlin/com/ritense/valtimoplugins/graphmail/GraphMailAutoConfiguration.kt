@@ -226,9 +226,19 @@ class GraphMailAutoConfiguration {
     // GraphMailPlugin per action invocation means an instance-owned guard would never see the
     // marker left by an earlier attempt of the same activity. See SendIdempotencyGuard's class
     // doc for what failure mode this does and does not protect against.
+    // Where "already sent" is remembered. The default is in-memory and therefore per-JVM: on a
+    // multi-node GZAC a retry picked up by another node has never heard of the marker, so the guard
+    // offers no protection there. Registering it separately means a deployment that needs the
+    // guarantee can supply a durable store — one committing outside the surrounding transaction —
+    // without replacing the guard's locking and eviction as well. See SentMarkerStore.
+    @Bean
+    @ConditionalOnMissingBean(SentMarkerStore::class)
+    fun sentMarkerStore(): SentMarkerStore = InMemorySentMarkerStore()
+
     @Bean
     @ConditionalOnMissingBean(SendIdempotencyGuard::class)
-    fun sendIdempotencyGuard(): SendIdempotencyGuard = SendIdempotencyGuard()
+    fun sendIdempotencyGuard(sentMarkerStore: SentMarkerStore): SendIdempotencyGuard =
+        SendIdempotencyGuard(sentMarkerStore)
 
     // Must be a single instance to mean anything — a per-invocation limiter would hand every
     // caller its own full set of permits and cap nothing at all.

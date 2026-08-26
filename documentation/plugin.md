@@ -168,14 +168,27 @@ De markering leeft in het geheugen van één JVM en verloopt na 30 minuten. Daar
 
 Bij één node, een retry-cyclus binnen het plafond en geen herstart — het gangbare geval — werkt de bescherming zoals beschreven.
 
-De TTL van 30 minuten is een constante in `SendIdempotencyGuard`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan kun je de bean wel vervangen — hij is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
+De TTL van 30 minuten is een constante in `InMemorySentMarkerStore`; er is géén property om hem te wijzigen. Heb je een langere retry-cyclus nodig, dan vervang je de store-bean — die is geregistreerd met `@ConditionalOnMissingBean`, dus een eigen bean in je applicatie wint:
 
 ```kotlin
 @Bean
-fun sendIdempotencyGuard() = SendIdempotencyGuard(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
+fun sentMarkerStore(): SentMarkerStore = InMemorySentMarkerStore(entryTtlMs = 2 * 60 * 60 * 1000L) // 2 uur
 ```
 
 Houd er rekening mee dat een langere TTL de markeringen navenant langer in geheugen houdt. Dat lost bovendien alleen de tweede rij hierboven op: multi-node en een herstart blijven buiten bereik van elke TTL-waarde.
+
+**Multi-node: een eigen markeringsopslag**
+
+Waar de markeringen leven zit achter `SentMarkerStore`, juist omdat de standaard in-memory is en dus per JVM geldt. Draai je meerdere nodes en heb je de garantie echt nodig, dan lever je een eigen implementatie:
+
+```kotlin
+@Bean
+fun sentMarkerStore(): SentMarkerStore = JdbcSentMarkerStore(dataSource)
+```
+
+> **Eén eis, en die is bepalend:** de opslag moet **buiten de omliggende transactie** committen — bijvoorbeeld in een `REQUIRES_NEW`-scope. Daar draait de hele guard om. De storing waar hij voor bestaat is een transactie die terugrolt *nadat* Graph het bericht al heeft geaccepteerd; een markering die het lot van die transactie deelt rolt mee terug en is voor de volgende poging nooit zichtbaar. Een gewone `@Transactional`-schrijfactie is daarmee niet beter dan een procesvariabele.
+
+De plugin levert bewust géén JDBC-implementatie mee: dat betekent een tabel, een changelog en een schemawijziging bij elke afnemer, en die keuze hoort bij de beheerder van de omgeving te liggen. Het aanknopingspunt staat klaar. De vergrendeling per sleutel blijft in `SendIdempotencyGuard`, dus een eigen store hoeft alleen markeringen op te slaan en terug te lezen, en moet thread-safe zijn.
 
 **Transportfouten worden bewust niet opnieuw geprobeerd**
 Een netwerkfout of read-timeout op de verzendaanroep zelf (`sendMail`, `messages/{id}/send`) zegt niets over of Graph het bericht al heeft geaccepteerd. De plugin probeert die aanroep daarom **niet** automatisch opnieuw en meldt de fout als `GraphMailUnknownOutcomeException` — beter één onzekere verzending dan een gegarandeerde dubbele mail bij de ontvanger. Conceptaanmaak en het aanmaken van een upload-sessie zijn wél herhaalbaar en worden wel opnieuw geprobeerd.
@@ -277,7 +290,7 @@ Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff 
 > | `R5/PT10M` | 50 minuten | **nee** — laatste retries vallen buiten de bescherming |
 > | `R3/PT1H` | 3 uur | **nee** |
 >
-> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SendIdempotencyGuard`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
+> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SentMarkerStore`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
 
 Resterende maximale blokkeerttijden per verzending:
 
