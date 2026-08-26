@@ -54,6 +54,20 @@ data class GraphMailHttpProperties(
      * Microsoft endpoint allowlist below — never enable it in a production deployment.
      */
     val allowNonMicrosoftEndpoints: Boolean = false,
+    /**
+     * Outbound proxy for Graph and token traffic. Leave unset to use whatever the JVM is already
+     * configured with (`-Dhttps.proxyHost` and friends) — that covers the common case, where the
+     * whole application shares one egress proxy.
+     *
+     * Set it only when this plugin needs a different proxy than the rest of the application.
+     * Deliberately a deployment setting and not a plugin property: a proxy sees the token request,
+     * client secret and all, so letting it be set from the admin UI would reopen the credential
+     * exfiltration path that moving [tokenBaseUrl] out of that UI closed.
+     */
+    val proxyHost: String? = null,
+    val proxyPort: Int? = null,
+    /** Pipe-separated host patterns that bypass the proxy, e.g. `localhost|*.intern.example.nl`. */
+    val nonProxyHosts: String? = null,
 ) {
     init {
         require(connectTimeoutSeconds in 1..120) {
@@ -70,6 +84,26 @@ data class GraphMailHttpProperties(
         require(attachmentAcquireTimeoutSeconds in 1..600) {
             "graph-mail.http.attachment-acquire-timeout-seconds must be between 1 and 600 " +
                 "(got $attachmentAcquireTimeoutSeconds)"
+        }
+        if (proxyHost != null) {
+            require(proxyHost.isNotBlank()) {
+                "graph-mail.http.proxy-host must not be blank. Remove the property to fall back to " +
+                    "the JVM's own proxy settings."
+            }
+            require(proxyHost.none { it.isWhitespace() || it.isISOControl() }) {
+                "graph-mail.http.proxy-host must not contain whitespace or control characters " +
+                    "(got '$proxyHost')."
+            }
+            require(!proxyHost.contains("://") && !proxyHost.contains('/')) {
+                "graph-mail.http.proxy-host must be a bare hostname without scheme or path " +
+                    "(got '$proxyHost'). Use proxy-port for the port."
+            }
+            requireNotNull(proxyPort) {
+                "graph-mail.http.proxy-port is required when proxy-host is set."
+            }
+            require(proxyPort in 1..65535) {
+                "graph-mail.http.proxy-port must be between 1 and 65535 (got $proxyPort)."
+            }
         }
         if (!allowNonMicrosoftEndpoints) {
             requireMicrosoftEndpoint(tokenBaseUrl, TOKEN_HOSTS, "graph-mail.http.token-base-url")

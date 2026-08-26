@@ -233,8 +233,19 @@ graph-mail:
     read-timeout-seconds: 30
     attachment-concurrency: 8                # max gelijktijdige verzendingen mét bijlagen
     attachment-acquire-timeout-seconds: 30
+    # proxy-host: proxy.intern.gemeente.nl   # alleen bij een eigen proxy, zie hieronder
+    # proxy-port: 8080
+    # non-proxy-hosts: "localhost|*.intern.gemeente.nl"
     # allow-non-microsoft-endpoints: true    # UITSLUITEND voor tests / lokale sandbox
 ```
+
+**Uitgaande proxy**
+
+Loopt het verkeer naar Microsoft via een forward proxy — bij overheidsorganisaties vrijwel altijd — dan hoef je in de regel niets in te stellen: zonder `proxy-host` gebruikt de plugin de proxy die de JVM al kent via `-Dhttps.proxyHost` en `-Dhttps.proxyPort`. Bij het opstarten logt de plugin welke proxy hij gebruikt, of dat hij er geen heeft. Controleer die regel als verzendingen falen met een connectiefout: zo'n fout wordt als *transient* geclassificeerd, dus de job-executor blijft het proberen en de melding ziet eruit als een tijdelijke storing.
+
+Stel `proxy-host` en `proxy-port` alleen in wanneer deze plugin een ándere proxy nodig heeft dan de rest van de applicatie. `non-proxy-hosts` volgt dezelfde notatie als `http.nonProxyHosts`: pipe-gescheiden patronen waarin `*` voor een willekeurige reeks tekens staat.
+
+> De proxy is bewust een deployment-instelling en geen pluginproperty. Al het verkeer naar het token-endpoint loopt erdoorheen, inclusief het formulier waarin het client secret wordt gePOST — instelbaar maken vanuit de beheer-UI zou hetzelfde exfiltratiepad heropenen dat hierboven is gedicht door `tokenBaseUrl` daar weg te halen.
 
 > **Migratie:** bestaande pluginconfiguraties met een `tokenBaseUrl`- of `graphBaseUrl`-waarde negeren die waarde na deze upgrade. Stond er een niet-standaard endpoint in, dan kun je dat **niet** ongewijzigd overzetten: `graph-mail.http` accepteert alleen endpoints uit de allowlist hierboven, en een afwijkende waarde laat de applicatie falen bij opstarten. Vervang zo'n endpoint door het juiste Microsoft-endpoint voor jouw cloud (`allow-non-microsoft-endpoints` is uitsluitend bedoeld voor tests en een lokale sandbox). `connectTimeoutSeconds` en `readTimeoutSeconds` kunnen wél ongewijzigd mee als `connect-timeout-seconds` en `read-timeout-seconds`.
 

@@ -19,6 +19,8 @@ import org.springframework.core.annotation.Order
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
+import java.net.InetSocketAddress
+import java.net.ProxySelector
 import java.net.http.HttpClient
 import java.time.Duration
 
@@ -73,19 +75,7 @@ class GraphMailAutoConfiguration {
         objectMapper: ObjectMapper,
         properties: GraphMailHttpProperties,
     ): RestClient {
-        val httpClient =
-            HttpClient
-                .newBuilder()
-                .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                // Pinned to HTTP/1.1 deliberately. The JDK client defaults to HTTP/2, which would make
-                // this refactor change the wire protocol as a side effect of adding pooling — the
-                // previous RestTemplate spoke HTTP/1.1. Connection reuse, the entire point here, comes
-                // from keep-alive and works exactly the same on 1.1, while HTTP/2 adds a variable that
-                // egress proxies and middleboxes in government networks do not always handle. Revisit
-                // as a deliberate, separately tested change rather than as a silent one.
-                .version(HttpClient.Version.HTTP_1_1)
-                .build()
+        val httpClient = graphHttpClient(properties)
 
         val requestFactory =
             JdkClientHttpRequestFactory(httpClient).apply {
@@ -99,6 +89,57 @@ class GraphMailAutoConfiguration {
                 converters.removeIf { it is MappingJackson2HttpMessageConverter }
                 converters.add(0, MappingJackson2HttpMessageConverter(objectMapper))
             }.build()
+    }
+
+    // Extracted so a test can assert on the client itself: the regression this guards against was a
+    // missing ProxySelector, and that is only visible on the HttpClient — not on the RestClient
+    // built around it.
+    internal fun graphHttpClient(properties: GraphMailHttpProperties): HttpClient =
+        HttpClient
+            .newBuilder()
+            .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            // Pinned to HTTP/1.1 deliberately. The JDK client defaults to HTTP/2, which would make
+            // adding pooling change the wire protocol as a side effect — the RestTemplate this
+            // replaced spoke HTTP/1.1. Connection reuse comes from keep-alive and works the same on
+            // 1.1, while HTTP/2 adds a variable that egress proxies in government networks do not
+            // always handle.
+            .version(HttpClient.Version.HTTP_1_1)
+            // Egress in a government network almost always runs through a forward proxy. The JDK
+            // client installs no ProxySelector of its own — not even when https.proxyHost is set —
+            // so without this every send fails at connect, and neverLeftTheClient() reports it as
+            // transient: the job executor then retries forever on something that can never succeed.
+            // The RestTemplate this replaced went through HttpURLConnection, which honoured those
+            // JVM properties, so leaving it out was a silent regression.
+            .proxy(proxySelectorFor(properties))
+            .build()
+
+    // An explicitly configured proxy wins; otherwise fall back to whatever the JVM already knows.
+    // Logged either way: a proxy that is silently absent, or silently different from what the
+    // operator intended, is indistinguishable from a network outage in the logs.
+    internal fun proxySelectorFor(properties: GraphMailHttpProperties): ProxySelector {
+        val host = properties.proxyHost
+        if (host == null) {
+            val fromJvm = System.getProperty("https.proxyHost")
+            if (fromJvm == null) {
+                logger.info("[Graph Mail Plugin] No outbound proxy configured; connecting to Graph directly.")
+            } else {
+                logger.info(
+                    "[Graph Mail Plugin] Using the JVM's proxy settings for Graph traffic ({}:{}). " +
+                        "Set graph-mail.http.proxy-host to override.",
+                    fromJvm,
+                    System.getProperty("https.proxyPort") ?: "(default)",
+                )
+            }
+            return ProxySelector.getDefault()
+        }
+
+        // proxyPort is guaranteed non-null here: GraphMailHttpProperties rejects a host without one.
+        val port = requireNotNull(properties.proxyPort)
+        logger.info("[Graph Mail Plugin] Using configured proxy for Graph traffic: {}:{}", host, port)
+        val proxy = ProxySelector.of(InetSocketAddress.createUnresolved(host, port))
+        val bypass = properties.nonProxyHosts
+        return if (bypass.isNullOrBlank()) proxy else BypassingProxySelector(proxy, bypass)
     }
 
     // Requires the client secret to be re-entered whenever the sender allowlist changes — the
