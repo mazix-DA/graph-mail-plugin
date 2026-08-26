@@ -20,7 +20,9 @@ import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
 import org.springframework.web.client.RestClient
 import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.ProxySelector
+import java.net.URI
 import java.net.http.HttpClient
 import java.time.Duration
 
@@ -94,8 +96,10 @@ class GraphMailAutoConfiguration {
     // Extracted so a test can assert on the client itself: the regression this guards against was a
     // missing ProxySelector, and that is only visible on the HttpClient — not on the RestClient
     // built around it.
-    internal fun graphHttpClient(properties: GraphMailHttpProperties): HttpClient =
-        HttpClient
+    internal fun graphHttpClient(properties: GraphMailHttpProperties): HttpClient {
+        val proxySelector = proxySelectorFor(properties)
+        logProxyInUse(proxySelector, properties)
+        return HttpClient
             .newBuilder()
             .connectTimeout(Duration.ofSeconds(properties.connectTimeoutSeconds))
             .followRedirects(HttpClient.Redirect.NEVER)
@@ -111,35 +115,62 @@ class GraphMailAutoConfiguration {
             // transient: the job executor then retries forever on something that can never succeed.
             // The RestTemplate this replaced went through HttpURLConnection, which honoured those
             // JVM properties, so leaving it out was a silent regression.
-            .proxy(proxySelectorFor(properties))
+            .proxy(proxySelector)
             .build()
+    }
 
     // An explicitly configured proxy wins; otherwise fall back to whatever the JVM already knows.
-    // Logged either way: a proxy that is silently absent, or silently different from what the
-    // operator intended, is indistinguishable from a network outage in the logs.
     internal fun proxySelectorFor(properties: GraphMailHttpProperties): ProxySelector {
         val host = properties.proxyHost
         if (host == null) {
-            val fromJvm = System.getProperty("https.proxyHost")
-            if (fromJvm == null) {
-                logger.info("[Graph Mail Plugin] No outbound proxy configured; connecting to Graph directly.")
-            } else {
-                logger.info(
-                    "[Graph Mail Plugin] Using the JVM's proxy settings for Graph traffic ({}:{}). " +
-                        "Set graph-mail.http.proxy-host to override.",
-                    fromJvm,
-                    System.getProperty("https.proxyPort") ?: "(default)",
-                )
-            }
-            return ProxySelector.getDefault()
+            // ProxySelector.getDefault() is nullable — ProxySelector.setDefault(null) is a public
+            // API, and this plugin runs inside somebody else's application. Passing null to
+            // HttpClient.Builder.proxy() throws, which fails bean creation and stops the whole
+            // application from starting over a proxy setting.
+            return ProxySelector.getDefault() ?: HttpClient.Builder.NO_PROXY
         }
 
         // proxyPort is guaranteed non-null here: GraphMailHttpProperties rejects a host without one.
         val port = requireNotNull(properties.proxyPort)
-        logger.info("[Graph Mail Plugin] Using configured proxy for Graph traffic: {}:{}", host, port)
         val proxy = ProxySelector.of(InetSocketAddress.createUnresolved(host, port))
         val bypass = properties.nonProxyHosts
         return if (bypass.isNullOrBlank()) proxy else BypassingProxySelector(proxy, bypass)
+    }
+
+    // Logged because a proxy that is silently absent, or silently different from what the operator
+    // intended, is indistinguishable from a network outage in the logs — and documentation/plugin.md
+    // sends administrators here first when sends fail at connect.
+    //
+    // Asks the selector what it would actually do with the Graph endpoint, rather than reading
+    // https.proxyHost back out of the system properties. Those two can disagree: the host
+    // application may have installed its own ProxySelector.setDefault(...), or set only
+    // http.proxyHost. A diagnostic line that reports "no proxy" while the client is in fact
+    // proxying sends the reader somewhere else entirely, which is worse than printing nothing.
+    private fun logProxyInUse(
+        selector: ProxySelector,
+        properties: GraphMailHttpProperties,
+    ) {
+        val resolved =
+            runCatching {
+                selector
+                    .select(URI.create(properties.graphBaseUrl))
+                    .firstOrNull { it.type() != Proxy.Type.DIRECT }
+            }.getOrNull()
+
+        val source = if (properties.proxyHost != null) "graph-mail.http.proxy-host" else "the JVM's proxy settings"
+        if (resolved == null) {
+            logger.info(
+                "[Graph Mail Plugin] No outbound proxy for {}; connecting to Graph directly.",
+                properties.graphBaseUrl,
+            )
+        } else {
+            logger.info(
+                "[Graph Mail Plugin] Graph traffic to {} goes through proxy {} (from {}).",
+                properties.graphBaseUrl,
+                resolved.address(),
+                source,
+            )
+        }
     }
 
     // Requires the client secret to be re-entered whenever the sender allowlist changes — the
