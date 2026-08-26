@@ -16,6 +16,7 @@
 package com.ritense.valtimoplugins.graphmail
 
 import com.ritense.resource.service.TemporaryResourceStorageService
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -388,6 +389,77 @@ class GraphMailPluginTest {
         assertEquals(1, captor.firstValue.attachments.size)
         assertEquals("doc.pdf", captor.firstValue.attachments[0].name)
     }
+
+    @Test fun `a successful send is counted as ok`() {
+        val registry = SimpleMeterRegistry()
+        pluginWithMetrics(registry).sendEmail(
+            execution,
+            "afzender@test.nl",
+            "jan@test.nl",
+            null,
+            null,
+            null,
+            "Onderwerp",
+            VALID_CONTENT_UUID,
+            null,
+        )
+
+        assertEquals(
+            1.0,
+            registry
+                .find("graph.mail.sends")
+                .tag("outcome", "ok")
+                .counter()
+                ?.count(),
+        )
+    }
+
+    @Test fun `a failed send is counted under the same verdict the audit log uses`() {
+        // The verdict is what tells an administrator whether to wait or to go change something.
+        // A dashboard that invents its own words for that is a second taxonomy to keep in sync.
+        val registry = SimpleMeterRegistry()
+        whenever(mailClient.sendMail(any(), any()))
+            .thenThrow(GraphMailPermanentException("Graph said no"))
+
+        assertThrows<GraphMailPermanentException> {
+            pluginWithMetrics(registry).sendEmail(
+                execution,
+                "afzender@test.nl",
+                "jan@test.nl",
+                null,
+                null,
+                null,
+                "Onderwerp",
+                VALID_CONTENT_UUID,
+                null,
+            )
+        }
+
+        assertEquals(
+            1.0,
+            registry
+                .find("graph.mail.sends")
+                .tag("outcome", "PERMANENT_REMOTE")
+                .counter()
+                ?.count(),
+            "expected a PERMANENT_REMOTE counter, got ${registry.meters.map { it.id }}",
+        )
+    }
+
+    private fun pluginWithMetrics(registry: SimpleMeterRegistry) =
+        GraphMailPlugin(
+            mailClient,
+            storage,
+            eventPublisher,
+            SendIdempotencyGuard(),
+            AttachmentConcurrencyLimiter(),
+            GraphMailMetrics(registry),
+        ).apply {
+            tenantId = "test-tenant"
+            clientId = "test-client"
+            clientSecret = "test-secret"
+            allowedSenders = "@test.nl"
+        }
 
     @Test fun `a file name with CRLF is rejected like every other header-bearing field`() {
         // Resource metadata is externally influenced — an uploaded file names itself — and this

@@ -5,8 +5,10 @@ import com.ritense.plugin.repository.PluginConfigurationRepository
 import com.ritense.plugin.service.PluginService
 import com.ritense.resource.service.TemporaryResourceStorageService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.event.ApplicationReadyEvent
@@ -257,6 +259,30 @@ class GraphMailAutoConfiguration {
             requireMicrosoftUploadHost = properties.isProductionGraphEndpoint(),
         )
 
+    // ObjectProvider rather than a nullable parameter: it resolves lazily and to nothing at all
+    // when Micrometer is absent, which is exactly the "metrics are optional" contract. The
+    // @ConditionalOnClass guard is what keeps this method from being loaded at all in that case —
+    // its signature mentions MeterRegistry, and a missing class on a bean method signature is a
+    // NoClassDefFoundError at context startup, not a quietly skipped bean.
+    @Bean
+    @ConditionalOnClass(io.micrometer.core.instrument.MeterRegistry::class)
+    @ConditionalOnMissingBean(GraphMailMetrics::class)
+    fun graphMailMetrics(
+        meterRegistry: ObjectProvider<io.micrometer.core.instrument.MeterRegistry>,
+        attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter,
+        graphTokenCache: GraphTokenCache,
+    ): GraphMailMetrics =
+        GraphMailMetrics(meterRegistry.getIfAvailable()).also {
+            it.bindAttachmentLimiter(attachmentConcurrencyLimiter)
+            it.bindTokenCache(graphTokenCache)
+        }
+
+    // The fallback for a host application without Micrometer on the classpath. Every method on it
+    // is a no-op, so the plugin behaves identically minus the meters.
+    @Bean
+    @ConditionalOnMissingBean(GraphMailMetrics::class)
+    fun graphMailMetricsDisabled(): GraphMailMetrics = GraphMailMetrics(null)
+
     @Bean
     @ConditionalOnMissingBean(GraphMailPluginFactory::class)
     fun graphMailPluginFactory(
@@ -266,6 +292,7 @@ class GraphMailAutoConfiguration {
         eventPublisher: ApplicationEventPublisher,
         sendIdempotencyGuard: SendIdempotencyGuard,
         attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter,
+        metrics: GraphMailMetrics,
     ): GraphMailPluginFactory =
         GraphMailPluginFactory(
             pluginService,
@@ -274,6 +301,7 @@ class GraphMailAutoConfiguration {
             eventPublisher,
             sendIdempotencyGuard,
             attachmentConcurrencyLimiter,
+            metrics,
         )
 
     @Bean

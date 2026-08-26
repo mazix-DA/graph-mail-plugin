@@ -145,6 +145,9 @@ class GraphTokenCache(
         return matching.size
     }
 
+    /** How many tokens are currently held. Exposed for the metrics gauge. */
+    fun size(): Int = tokens.size
+
     /** Returns the number of entries that were cleared. */
     fun invalidateAll(): Int {
         val count = tokens.size

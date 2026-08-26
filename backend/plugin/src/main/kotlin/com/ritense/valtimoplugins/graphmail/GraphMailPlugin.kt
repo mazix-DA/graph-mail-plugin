@@ -185,6 +185,8 @@ class GraphMailPlugin(
     private val sendIdempotencyGuard: SendIdempotencyGuard = SendIdempotencyGuard(),
     // Bounds peak attachment heap independently of the job-executor pool size — see its class doc.
     private val attachmentConcurrencyLimiter: AttachmentConcurrencyLimiter = AttachmentConcurrencyLimiter(),
+    // No-op when the host application has no Micrometer — see GraphMailMetrics.
+    private val metrics: GraphMailMetrics = GraphMailMetrics(null),
 ) {
     private val logger = LoggerFactory.getLogger(GraphMailPlugin::class.java)
 
@@ -377,6 +379,7 @@ class GraphMailPlugin(
                         attachments.size,
                         durationMs,
                     )
+                    metrics.recordSend("ok", attachments.isNotEmpty(), durationMs)
                     publishEventSafely(
                         GraphMailEmailSentEvent(
                             senderMailbox = maskEmail(senderMailbox),
@@ -400,6 +403,13 @@ class GraphMailPlugin(
                         durationMs,
                         retryVerdictOf(ex),
                         maskEmailsInText(ex.message),
+                    )
+                    // Same vocabulary as the audit log's verdict field, so a dashboard and a log
+                    // line name the same failure the same way.
+                    metrics.recordSend(
+                        retryVerdictOf(ex).substringBefore(" —"),
+                        attachmentIdList.isNotEmpty(),
+                        durationMs,
                     )
                     publishEventSafely(
                         GraphMailEmailFailedEvent(
