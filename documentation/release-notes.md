@@ -47,7 +47,8 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
 - Elke mislukte verzending logt nu waarom hij mislukte en of opnieuw proberen zin heeft.
 - Een proxy die om authenticatie vroeg (407) werd behandeld als een tijdelijke storing, dus de
   job-executor bleef herproberen op iets dat elke poging identiek weigert. Nu een permanente fout
-  die naar de proxy wijst in plaats van naar Graph.
+  die naar de proxy wijst in plaats van naar Graph. Let op: een proxy die authenticatie eist wordt
+  niet ondersteund — de HTTP-client kan geen proxy-credentials aanbieden. Zie [plugin.md](plugin.md).
 - Mislukte een verzending via de upload-sessie op een manier waaruit blijkt dat er niets verstuurd
   is, dan bleef het concept achter in de afzendermailbox. Bij een cyclus als `R5/PT2M` liepen die
   op tot vijf per mislukte verzending. Een verzending met onzekere afloop laat het concept nog
