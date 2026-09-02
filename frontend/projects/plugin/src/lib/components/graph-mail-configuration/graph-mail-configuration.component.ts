@@ -129,6 +129,9 @@ export class GraphMailPluginConfigurationComponent
         )
         .subscribe(id => {
           this.savedConfigurationId = id;
+          // Validity depends on this id, which lands after the prefill — so recompute.
+          const formValue = this.formValue$.getValue();
+          if (formValue) this.updateValidAndVisibility(formValue);
         });
     }
   }

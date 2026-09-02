@@ -28,14 +28,14 @@ class GraphMailAutoConfiguration {
     // Fired once after the full application context is ready.
     // Reminds operators to size the job-executor thread pool correctly: the plugin's
     // retry backoff uses Thread.sleep(), which blocks the calling job-executor thread
-    // for up to 30s (regular send) or 120s (upload-session flow for attachments > 2 MB).
+    // for up to 30s (regular send) or 120s (draft flow for attachments that don't fit inline).
     @EventListener(ApplicationReadyEvent::class)
     fun warnOnStartup() {
         logger.warn(
             "[Graph Mail Plugin] IMPORTANT: this plugin blocks Operaton job-executor threads during " +
                 "retry backoff (up to 30s per send, 120s for large attachments). " +
                 "Set operaton.bpm.job-executor.core-pool-size >= 20 and max-pool-size >= 50 " +
-                "to prevent job-executor starvation under load. See documentation/plugin.md for details.",
+                "to prevent job-executor starvation under load. See documentation/developer.md for details.",
         )
     }
 
