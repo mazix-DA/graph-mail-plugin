@@ -801,6 +801,33 @@ class GraphMailClientTest {
         wireMock.verify(0, putRequestedFor(anyUrl()))
     }
 
+    @Test fun `a sandbox upload URL on the same host but another port is rejected`() {
+        stubToken()
+        stubDraftCreate("draft-port")
+        // Same scheme and host as graphBaseUrl, different port. Host alone would accept this, and
+        // on a developer machine port 2375 is the Docker daemon — the attachment would be PUT there.
+        val otherPort = wireMock.port() + 1
+        stubUploadSession("http://localhost:$otherPort/upload/other-port")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+
+        val attachment = resolvedAttachment("large.bin", (INLINE_ATTACHMENT_THRESHOLD_BYTES + 1).toInt())
+        assertThrows(GraphMailPermanentException::class.java) {
+            client.sendMail(
+                credentials(),
+                OutboundMail(
+                    senderMailbox = mailbox,
+                    toRecipients = recipients("jan@test.nl"),
+                    subject = "T",
+                    bodyHtml = "<p>B</p>",
+                    attachments = listOf(attachment),
+                ),
+            )
+        }
+
+        // The assertion that matters: the bytes never left.
+        wireMock.verify(0, putRequestedFor(anyUrl()))
+    }
+
     // Acceptance on the strict branch is not tested here on purpose: it needs an https endpoint on
     // a real Microsoft-suffixed host, which cannot be stubbed locally. What the strict branch
     // accepts is pinned instead by GraphMailHttpPropertiesTest (which set each cloud gets) together

@@ -925,10 +925,18 @@ class GraphMailClientImpl(
                     host != null &&
                     uploadHostSuffixes.any { host == it.removePrefix(".") || host.endsWith(it) }
             } else {
-                // Sandbox/test endpoint: accept only the very host we are already talking to, never an
-                // arbitrary third one.
+                // Sandbox/test endpoint: accept only the exact origin we are already talking to —
+                // scheme, host *and* port. Host alone is not enough: with a sandbox on
+                // http://localhost:8089, an upload URL of http://localhost:2375 shares the host and
+                // would be accepted, sending attachment bytes to the Docker daemon. Any other
+                // service bound to loopback is reachable the same way.
                 val expected = runCatching { java.net.URI.create(graphBaseUrl) }.getOrNull()
-                uri?.scheme == expected?.scheme && host != null && host == expected?.host
+                uri != null &&
+                    expected != null &&
+                    uri.scheme == expected.scheme &&
+                    host != null &&
+                    host == expected.host &&
+                    effectivePort(uri) == effectivePort(expected)
             }
         // Typed rather than require(): an IllegalArgumentException would be classified as
         // PERMANENT_INPUT and tell the administrator to correct the process data, when the actual
@@ -952,6 +960,17 @@ class GraphMailClientImpl(
             )
         }
     }
+
+    // URI.getPort() is -1 when the URL carries no explicit port, so a bare http://host and an
+    // http://host:80 would compare unequal while naming the same origin. Normalise to the scheme's
+    // default before comparing.
+    private fun effectivePort(uri: URI): Int =
+        when {
+            uri.port != -1 -> uri.port
+            uri.scheme == "https" -> 443
+            uri.scheme == "http" -> 80
+            else -> -1
+        }
 
     private fun uploadInChunks(
         uploadUrl: String,
