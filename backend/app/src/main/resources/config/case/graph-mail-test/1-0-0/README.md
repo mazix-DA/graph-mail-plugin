@@ -107,6 +107,32 @@ De teller in `failOnce` staat bewust in geheugen en niet in een procesvariabele:
 transactie mee terugrollen, waardoor elke poging opnieuw de eerste zou zijn en het proces nooit
 voorbij die taak kwam. Hij telt per procesinstantie, dus elke nieuwe start faalt weer eenmalig.
 
+## Wat deze testcase níét beproeft: de HTML-sanitisatie
+
+`storeBody` zet de **Berichttekst** door een `escapeHtml` voordat het de HTML samenstelt:
+
+```kotlin
+<p>${escapeHtml(bodyText)}</p>
+```
+
+Markup die je in dat veld typt komt dus als leesbare tekst in de mail aan — je ziet de tag staan,
+maar het is nooit een element geweest en de sanitizer van de plugin krijgt hem niet te zien. De
+testmail-knop in het beheerscherm gebruikt een vaste body, dus ook daarlangs komt er geen ruwe HTML
+binnen.
+
+Dat is opzet: de scaffolding is de *producent* van de body, en een producent hoort geen kapotte
+markup af te leveren. Dat de plugin daarnaast saneert is een tweede lijn, geen excuus om zelf slordig
+te zijn.
+
+Gevolg: **de sanitizer is met T1 t/m T8 niet te beproeven.** Wie dat gedrag wil zien, kijkt naar de
+unit tests in `backend/plugin/src/test/.../GraphMailPluginTest.kt` — `an http image source is
+stripped while https and cid survive` en de testgevallen rond inline `style`-attributen, inclusief de
+ontwijkingen met CSS-escapes en comment-splicing.
+
+Wil je toch handmatig met ruwe HTML testen, dan moet je die zelf in `TemporaryResourceStorageService`
+zetten en het resulterende resource-id als `contentId` aan de actie meegeven, buiten dit
+procesmodel om.
+
 ## Overnemen naar je eigen project
 
 Kopieer de map `config/case/graph-mail-test/` en `MailTestSupport.kt`. De bean heeft alleen

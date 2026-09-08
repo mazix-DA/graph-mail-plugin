@@ -67,9 +67,10 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
   CSS-escapes en -commentaar worden nu herkend.
 - Diezelfde tracking-pixel kon er via `<img src="http://...">` gewoon langs. Een afbeelding wordt
   opgehaald zodra de ontvanger de mail opent, dus dat verraadt het leesmoment over een onbeveiligde
-  verbinding. `http` vervalt voor afbeeldingen; `https` en `cid:` blijven. Een `<a href="http://...">`
-  blijft wel toegestaan — die wordt pas gevolgd als iemand klikt. Wil je élke externe request
-  uitsluiten, stuur afbeeldingen dan als bijlage en verwijs met `cid:`.
+  verbinding. `http` vervalt voor afbeeldingen; `https` en `cid:` blijven, dus een logo werkt gewoon
+  — alleen een bestaand sjabloon met een logo op `http://` moet naar `https://` of `cid:`. Een
+  `<a href="http://...">` blijft wel toegestaan: die wordt pas gevolgd als iemand klikt. Wil je élke
+  externe request uitsluiten, stuur afbeeldingen dan als bijlage en verwijs met `cid:`.
 - Een verkeerd getypt client secret in het testmail-scherm logde de beheerder uit.
 - Een geweigerde upload-URL meldde alleen dát hostvalidatie faalde. Op `DEBUG` staat nu ook welke
   host het was, zodat een ontbrekend clouddomein te melden is. Uit de foutmelding zelf blijft hij
