@@ -209,12 +209,21 @@ Deze classificatie zit bewust in de logging en niet in een `BpmnError`: het omze
 **HTML-body sanitisatie**
 De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met `https`- of `cid`-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Ook binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en `javascript:` weggefilterd — anders zou een `style="background:url(https://tracker/pixel.png)"` alsnog een externe request (tracking pixel) veroorzaken, precies waarvoor `<style>`-blokken geweerd worden. Het hele `style`-attribuut vervalt bij zo'n treffer, niet alleen de betreffende declaratie: een waarde die al een ontwijkingspoging bevat, laat zich niet betrouwbaar in een schoon en een vuil deel splitsen.
 
-`<img src="http://...">` wordt sinds 1.0.4 eveneens geweerd. Een afbeelding in een e-mail wordt opgehaald zodra de ontvanger het bericht opent, dus een `http`-bron vertelt een derde partij wanneer een burger zijn correspondentie las, over een verbinding die niemand kan garanderen — en vrijwel geen mailclient toont ze nog. Wat blijft:
+`<img src="http://...">` wordt sinds 1.0.4 eveneens geweerd. Een afbeelding in een e-mail wordt opgehaald zodra de ontvanger het bericht opent, dus een `http`-bron vertelt een derde partij wanneer een burger zijn correspondentie las, over een verbinding die niemand kan garanderen.
 
-- **`cid:`** — de ingesloten bijlage. Geen externe request; dit is de aangewezen manier om een logo mee te sturen.
-- **`https`** — blijft toegestaan, want een afbeelding op de eigen server is legitiem gebruik van `<img>`.
+**Logo's blijven gewoon werken.** Beide manieren waarop je er in de praktijk een meestuurt, zijn ongemoeid:
 
-Wees eerlijk over de grens daarvan: ook een `https`-afbeelding is een externe request en kan dus als tracking pixel dienen. Het verschil met `url()` in inline CSS is dat die in transactionele post geen legitiem doel dient en `<img>` wel. Wil je élke externe request uitsluiten, gebruik dan uitsluitend `cid:`-bronnen. Een `<a href="http://...">` blijft overigens wel toegestaan: een link wordt pas gevolgd als de ontvanger erop klikt. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
+| Bron | Resultaat |
+|---|---|
+| `<img src="cid:logo">` | werkt — logo als bijlage, ingesloten. Geen externe request; de aangewezen route. |
+| `<img src="https://gemeente.nl/logo.png">` | werkt — logo op de eigen server. |
+| `<img src="http://gemeente.nl/logo.png">` | `src` wordt verwijderd. |
+
+Het verschil tussen de laatste twee is de **s**. Heb je een bestaand sjabloon met een logo op `http://`, dan moet dat naar `https://` of naar `cid:` — wat je sowieso wilt.
+
+Wees eerlijk over de grens daarvan: ook een `https`-afbeelding is een externe request en kan dus als tracking pixel dienen. Het verschil met `url()` in inline CSS is dat die in transactionele post geen legitiem doel dient en `<img>` wel. Wil je élke externe request uitsluiten, gebruik dan uitsluitend `cid:`-bronnen. Een `<a href="http://...">` blijft overigens wel toegestaan: een link wordt pas gevolgd als de ontvanger erop klikt.
+
+> **De sanitisatie is niet met T1 t/m T8 te beproeven.** `MailTestSupport` zet de berichttekst uit het startformulier door een `escapeHtml` voordat het de HTML samenstelt, dus markup die je daar intypt komt als leesbare tekst aan en bereikt de sanitizer nooit als element. De testmail-knop gebruikt een vaste body. Het gedrag is gedekt door unit tests in `GraphMailPluginTest` — zoek op `an http image source is stripped` en op de testgevallen rond `style`-attributen. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
 
 **Limieten**
 
