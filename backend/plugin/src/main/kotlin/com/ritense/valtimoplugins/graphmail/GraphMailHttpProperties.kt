@@ -20,6 +20,36 @@ private val GRAPH_HOSTS =
         "microsoftgraph.chinacloudapi.cn",
     )
 
+// Hosts that may serve an attachment upload session, per cloud instance. Graph does not serve the
+// upload itself: createUploadSession hands back a URL on the cloud's own storage/SharePoint domain,
+// and those domains differ per cloud. Keeping them separate per cloud rather than in one flat list
+// is deliberate — a US Gov deployment has no business accepting a commercial upload host, and a
+// single list would let it.
+//
+// Each entry is a suffix beginning with '.', so the match cannot be fooled by a host that merely
+// ends in the same letters (see validateUploadUrl).
+//
+// The commercial set is the one this plugin has always used and is exercised in production. The
+// sovereign sets follow Microsoft's published cloud endpoint domains but have NOT been verified
+// against a live sovereign tenant. A host that is missing here now surfaces on DEBUG from
+// GraphMailClientImpl.validateUploadUrl rather than failing anonymously, so a gap is reportable.
+private val COMMERCIAL_UPLOAD_HOSTS =
+    setOf(".microsoft.com", ".office.com", ".office.net", ".office365.com", ".sharepoint.com")
+
+private val US_GOV_UPLOAD_HOSTS =
+    setOf(".microsoft.us", ".office365.us", ".sharepoint.us", ".sharepoint-mil.us")
+
+private val CHINA_UPLOAD_HOSTS =
+    setOf(".chinacloudapi.cn", ".sharepoint.cn", ".partner.microsoftonline.cn")
+
+private val UPLOAD_HOSTS_PER_CLOUD =
+    mapOf(
+        "graph.microsoft.com" to COMMERCIAL_UPLOAD_HOSTS,
+        "graph.microsoft.us" to US_GOV_UPLOAD_HOSTS,
+        "dod-graph.microsoft.us" to US_GOV_UPLOAD_HOSTS,
+        "microsoftgraph.chinacloudapi.cn" to CHINA_UPLOAD_HOSTS,
+    )
+
 /**
  * Deployment-level HTTP settings for the Graph Mail plugin.
  *
@@ -155,6 +185,23 @@ data class GraphMailHttpProperties(
      * because [init] has already validated that configuration.
      */
     fun isProductionGraphEndpoint(): Boolean = runCatching { URI.create(graphBaseUrl).host }.getOrNull() in GRAPH_HOSTS
+
+    /**
+     * The upload-session hosts acceptable for the configured cloud, or null when [graphBaseUrl] is
+     * not a real Graph endpoint — a WireMock or sandbox endpoint legitimately serves the upload from
+     * its own host, and [GraphMailClientImpl] pins it to exactly that host instead.
+     *
+     * Returning the cloud's own set rather than a boolean is what fixes the gap this replaced: the
+     * old boolean said only "must be a Microsoft host" and was then checked against a commercial-only
+     * list, so every sovereign-cloud deployment failed host validation on the first attachment over
+     * 2 MiB — while accepting the sovereign Graph endpoint itself without complaint.
+     */
+    fun uploadHostSuffixes(): Set<String>? {
+        val host =
+            runCatching { URI.create(graphBaseUrl).host }
+                .getOrNull()
+        return UPLOAD_HOSTS_PER_CLOUD[host]
+    }
 }
 
 private fun requireMicrosoftEndpoint(

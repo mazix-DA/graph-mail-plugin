@@ -43,7 +43,26 @@ private val EMAIL_HTML_SAFELIST: Safelist =
         .addAttributes("th", "colspan", "rowspan", "width")
         .addAttributes("img", "width", "height")
         .addProtocols("a", "href", "http", "https", "mailto", "tel")
-        .addProtocols("img", "src", "http", "https", "cid")
+        // No "http" for img src, deliberately. An <img> in a transactional email is fetched by the
+        // recipient's mail client the moment the message is opened, so a plaintext fetch tells a
+        // third party — and every hop in between — when a citizen read their correspondence, over a
+        // connection nobody can vouch for. Practically no mail client renders http images by
+        // default any more either, so the tag was carrying the risk without delivering the picture.
+        //
+        // What stays, and the honest limit of it:
+        //   - "cid:" is the embedded attachment. No external fetch at all, and the right way to put
+        //     a logo in an email this plugin sends.
+        //   - "https" stays because a self-hosted image is legitimate use of <img>, and blocking it
+        //     would break real templates. It is still an external fetch: an https tracking pixel
+        //     tracks just as well as an http one. Blocking url() in inline CSS (below) is not a
+        //     claim that <img> is safe — it is that url() has no legitimate purpose in a
+        //     transactional email, while <img> does, so the two get different treatment.
+        .addProtocols("img", "src", "https", "cid")
+        // relaxed() already permits http for img src, and addProtocols only ever adds, so the
+        // removal has to be explicit. Note this applies to img only: an <a href="http://…"> stays,
+        // because a link is followed when the recipient chooses to click it, not the moment the
+        // message is opened.
+        .removeProtocols("img", "src", "http")
 
 private val EMAIL_OUTPUT_SETTINGS =
     org.jsoup.nodes.Document

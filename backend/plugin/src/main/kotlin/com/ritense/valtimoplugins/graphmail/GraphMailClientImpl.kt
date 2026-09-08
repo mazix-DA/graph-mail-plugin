@@ -73,9 +73,6 @@ private const val CLIENT_REQUEST_ID_HEADER = "client-request-id"
 private const val REQUEST_ID_HEADER = "request-id"
 
 // Hosts Graph legitimately hands back for an attachment upload session.
-private val MICROSOFT_UPLOAD_HOST_SUFFIXES =
-    listOf(".microsoft.com", ".office.com", ".office.net", ".office365.com", ".sharepoint.com")
-
 // NOTE (threading): retry backoff still uses Thread.sleep(), but only within MAX_IN_CALL_WAIT_MS.
 // Beyond that the operation gives up its thread and returns a retryable failure, so a throttling
 // storm can no longer hold the job-executor pool hostage. Configure a failedJobRetryTimeCycle on
@@ -142,15 +139,15 @@ class GraphMailClientImpl(
     private val tokenBaseUrl: String = "https://login.microsoftonline.com",
     private val graphBaseUrl: String = "https://graph.microsoft.com",
     private val tokenCache: GraphTokenCache = GraphTokenCache(),
-    // Whether an upload URL handed back by the API must live on a Microsoft host. True whenever
-    // graphBaseUrl is a real Graph endpoint (see GraphMailHttpProperties.isProductionGraphEndpoint);
-    // false only for a WireMock or sandbox endpoint, which legitimately returns its own host.
+    // Host suffixes an upload URL may live on, for the cloud graphBaseUrl points at (see
+    // GraphMailHttpProperties.uploadHostSuffixes). Null only for a WireMock or sandbox endpoint,
+    // which legitimately returns its own host; that case is pinned to exactly graphBaseUrl's host.
     //
-    // This used to be inferred inline by comparing the upload URL against graphBaseUrl, which made
-    // the check exactly as strong as whatever an administrator had typed into the graphBaseUrl
-    // plugin property. That property is gone; the decision now comes from validated deployment
-    // configuration instead.
-    private val requireMicrosoftUploadHost: Boolean = true,
+    // This used to be a boolean checked against one commercial-only list, which meant a sovereign
+    // cloud — accepted everywhere else in the configuration — failed validation on every upload URL
+    // it was handed. Carrying the cloud's own set instead also keeps the clouds apart: a US Gov
+    // deployment no longer accepts a commercial upload host, which the boolean allowed.
+    private val uploadHostSuffixes: Set<String>? = null,
 ) : GraphMailClient {
     private val logger = LoggerFactory.getLogger(GraphMailClientImpl::class.java)
 
@@ -923,15 +920,23 @@ class GraphMailClientImpl(
         val uri = runCatching { java.net.URI.create(uploadUrl) }.getOrNull()
         val host = uri?.host
         val valid =
-            if (requireMicrosoftUploadHost) {
+            if (uploadHostSuffixes != null) {
                 uri?.scheme == "https" &&
                     host != null &&
-                    MICROSOFT_UPLOAD_HOST_SUFFIXES.any { host == it.removePrefix(".") || host.endsWith(it) }
+                    uploadHostSuffixes.any { host == it.removePrefix(".") || host.endsWith(it) }
             } else {
-                // Sandbox/test endpoint: accept only the very host we are already talking to, never an
-                // arbitrary third one.
+                // Sandbox/test endpoint: accept only the exact origin we are already talking to —
+                // scheme, host *and* port. Host alone is not enough: with a sandbox on
+                // http://localhost:8089, an upload URL of http://localhost:2375 shares the host and
+                // would be accepted, sending attachment bytes to the Docker daemon. Any other
+                // service bound to loopback is reachable the same way.
                 val expected = runCatching { java.net.URI.create(graphBaseUrl) }.getOrNull()
-                uri?.scheme == expected?.scheme && host != null && host == expected?.host
+                uri != null &&
+                    expected != null &&
+                    uri.scheme == expected.scheme &&
+                    host != null &&
+                    host == expected.host &&
+                    effectivePort(uri) == effectivePort(expected)
             }
         // Typed rather than require(): an IllegalArgumentException would be classified as
         // PERMANENT_INPUT and tell the administrator to correct the process data, when the actual
@@ -940,11 +945,32 @@ class GraphMailClientImpl(
         // The rejected host is deliberately kept out of the message: it comes from an external
         // response and this string ends up in logs and, indirectly, in operator-facing errors.
         if (!valid) {
+            // The host stays out of the exception for the reason above, but a rejection with no way
+            // at all to see what was rejected is undiagnosable: an administrator on a cloud whose
+            // upload domain is missing from the list has nothing to report. DEBUG is the right level
+            // — off by default, deliberate to enable, never on the path of a successful send.
+            logger.debug(
+                "Rejected upload URL host '{}' (scheme '{}'); accepted for this cloud: {}",
+                host,
+                uri?.scheme,
+                uploadHostSuffixes ?: "exactly the configured Graph host",
+            )
             throw GraphMailPermanentException(
                 "Upload URL returned by the Graph API failed host validation",
             )
         }
     }
+
+    // URI.getPort() is -1 when the URL carries no explicit port, so a bare http://host and an
+    // http://host:80 would compare unequal while naming the same origin. Normalise to the scheme's
+    // default before comparing.
+    private fun effectivePort(uri: URI): Int =
+        when {
+            uri.port != -1 -> uri.port
+            uri.scheme == "https" -> 443
+            uri.scheme == "http" -> 80
+            else -> -1
+        }
 
     private fun uploadInChunks(
         uploadUrl: String,

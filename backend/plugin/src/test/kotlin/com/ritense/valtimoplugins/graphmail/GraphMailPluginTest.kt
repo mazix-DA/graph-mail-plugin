@@ -838,4 +838,30 @@ class GraphMailPluginTest {
         send()
         verify(mailClient, times(2)).sendMail(any(), any())
     }
+
+    // ── img src protocols ──────────────────────────────────────────────────
+
+    @Test fun `an http image source is stripped while https and cid survive`() {
+        // The CSS rules above block url() because it fetches an external resource on open. A plain
+        // <img> is the same fetch by a shorter route, so http — the one variant that is both
+        // trackable and unprotected in transit — goes too. https and cid: stay: a self-hosted logo
+        // and an embedded attachment are what <img> is legitimately for in a transactional email.
+        mockBodyHtml(
+            """
+            <p>x</p>
+            <img src="http://tracker.example/p.gif">
+            <img src="https://eigen-domein.nl/logo.png">
+            <img src="cid:logo123">
+            """.trimIndent(),
+        )
+        val captor = argumentCaptor<OutboundMail>()
+
+        send()
+
+        verify(mailClient).sendMail(any(), captor.capture())
+        val body = captor.firstValue.bodyHtml
+        assertFalse(body.contains("tracker.example"), "http image survived sanitisation: $body")
+        assertTrue(body.contains("https://eigen-domein.nl/logo.png"), "https image was dropped: $body")
+        assertTrue(body.contains("cid:logo123"), "cid image was dropped: $body")
+    }
 }

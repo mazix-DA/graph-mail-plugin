@@ -207,7 +207,14 @@ Elke mislukte verzending logt een `verdict`-veld dat aangeeft wat de beheerder m
 
 Deze classificatie zit bewust in de logging en niet in een `BpmnError`: het omzetten van permanente fouten naar een BPMN-fout zou de procesafhandeling van elk bestaand model wijzigen, en een niet-afgevangen `BpmnError` degradeert tot een incident met de melding "no catching boundary event found" — minder bruikbaar dan de fout die de plugin nu gooit. Wil je permanente fouten in het procesmodel afvangen, gebruik dan een `failedJobRetryTimeCycle` in combinatie met een incident-handler.
 **HTML-body sanitisatie**
-De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met http/https/cid-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Ook binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en `javascript:` weggefilterd — anders zou een `style="background:url(https://tracker/pixel.png)"` alsnog een externe request (tracking pixel) veroorzaken, precies waarvoor `<style>`-blokken geweerd worden. De overige stijlregels blijven intact. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
+De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met `https`- of `cid`-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Ook binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en `javascript:` weggefilterd — anders zou een `style="background:url(https://tracker/pixel.png)"` alsnog een externe request (tracking pixel) veroorzaken, precies waarvoor `<style>`-blokken geweerd worden. Het hele `style`-attribuut vervalt bij zo'n treffer, niet alleen de betreffende declaratie: een waarde die al een ontwijkingspoging bevat, laat zich niet betrouwbaar in een schoon en een vuil deel splitsen.
+
+`<img src="http://...">` wordt sinds 1.0.4 eveneens geweerd. Een afbeelding in een e-mail wordt opgehaald zodra de ontvanger het bericht opent, dus een `http`-bron vertelt een derde partij wanneer een burger zijn correspondentie las, over een verbinding die niemand kan garanderen — en vrijwel geen mailclient toont ze nog. Wat blijft:
+
+- **`cid:`** — de ingesloten bijlage. Geen externe request; dit is de aangewezen manier om een logo mee te sturen.
+- **`https`** — blijft toegestaan, want een afbeelding op de eigen server is legitiem gebruik van `<img>`.
+
+Wees eerlijk over de grens daarvan: ook een `https`-afbeelding is een externe request en kan dus als tracking pixel dienen. Het verschil met `url()` in inline CSS is dat die in transactionele post geen legitiem doel dient en `<img>` wel. Wil je élke externe request uitsluiten, gebruik dan uitsluitend `cid:`-bronnen. Een `<a href="http://...">` blijft overigens wel toegestaan: een link wordt pas gevolgd als de ontvanger erop klikt. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
 
 **Limieten**
 
@@ -236,6 +243,13 @@ Wie deze sleutel én een databasedump bezit, kan alle plugin-secrets (waaronder 
 `tokenBaseUrl` en `graphBaseUrl` waren eerder per pluginconfiguratie instelbaar vanuit de beheer-UI. Dat was een exfiltratiepad voor het client secret: dat secret wordt als formulierveld naar `tokenBaseUrl` gePOST, dus wie pluginconfiguraties mocht beheren kon het naar een eigen host laten sturen. `graphBaseUrl` gaf daarnaast een SSRF-primitief, en de hostcontrole op de upload-URL leidde haar verwachte host áf uit `graphBaseUrl` — waardoor die controle precies zo sterk was als de waarde die een beheerder had ingevuld.
 
 Deze instellingen staan nu onder `graph-mail.http` en worden bij het opstarten gevalideerd tegen een vaste allowlist van Microsoft-endpoints (inclusief de sovereign clouds). Een afwijkende waarde laat de applicatie falen bij opstarten met een leesbare melding.
+
+**Uploadhosts worden per cloud gescheiden**
+Bijlagen boven 2 MiB gaan via een upload-sessie, en Graph levert daarvoor een URL op een eigen opslag- of SharePoint-domein — dat per cloud verschilt. De plugin controleert die host tegen de lijst die hoort bij de cloud waar `graph-base-url` naar wijst, niet tegen één gedeelde lijst. Een US Gov-omgeving accepteert dus geen commerciële uploadhost en andersom.
+
+Tot en met 1.0.3 bestond die lijst alleen uit commerciële hosts, terwijl de configuratie een sovereign endpoint wél accepteerde. Kleine mails werkten daardoor, en de eerste bijlage boven 2 MiB faalde permanent op hostvalidatie.
+
+> **Kanttekening.** De commerciële lijst draait in productie. De sovereign lijsten volgen Microsofts gepubliceerde clouddomeinen maar zijn niet tegen een levende sovereign tenant beproefd. Loopt een upload toch stuk op `Upload URL returned by the Graph API failed host validation`, zet dan `logging.level.com.ritense.valtimoplugins.graphmail=DEBUG`: de geweigerde host komt daar in de log te staan. De host blijft bewust uit de foutmelding zelf, omdat die uit een extern antwoord komt en in logs en beheerdersmeldingen terechtkomt.
 
 ```yaml
 graph-mail:
