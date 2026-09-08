@@ -43,6 +43,24 @@ configuratie in het beheerscherm hebt aangemaakt. Een gefixeerde UUID meeleveren
 
 Doe dit voor **beide** processen; ze hebben allebei een taak met id `send-email`.
 
+## Het formulier schrijft procesvariabelen, geen documentvelden
+
+De velden in `graph-mail-test-start.form.json` dragen allemaal het prefix `pv:` — `pv:senderMailbox`,
+`pv:recipients`, enzovoort. Dat is geen stijlkeuze maar een vereiste: Valtimo schrijft een veld
+zonder prefix naar het **document**, en een veld met `pv:` naar een **procesvariabele**
+(`FormIoFormDefinition` onderscheidt `processVarName` en `documentJsonPointer`).
+
+Zowel de process-links als `MailTestSupport` lezen procesvariabelen. Haal je het prefix weg, dan
+komt de invoer in het document terecht, blijven de procesvariabelen leeg en faalt `send-email` op:
+
+```
+NullPointerException: Parameter specified as non-null is null:
+method ...GraphMailPlugin.sendEmail, parameter senderMailbox
+```
+
+De document-definitie houdt dezelfde velden aan zodat de zaak een geldig schema heeft; het formulier
+vult ze niet.
+
 ## De twee processen
 
 ### `graph-mail-test-process` — T4, T5, T8
@@ -94,3 +112,22 @@ voorbij die taak kwam. Hij telt per procesinstantie, dus elke nieuwe start faalt
 Kopieer de map `config/case/graph-mail-test/` en `MailTestSupport.kt`. De bean heeft alleen
 `TemporaryResourceStorageService` nodig en hangt verder nergens aan vast. Pas de casedefinitie aan
 als `graph-mail-test` bij jou al bestaat.
+
+Twee dingen aan `MailTestSupport.kt` moeten kloppen, anders is de bean onbereikbaar vanuit BPMN:
+
+1. **Het `package` moet onder je eigen `@SpringBootApplication`-klasse vallen**, anders wordt de
+   klasse niet gescand. Pas de `package`-regel aan en leg het bestand in de bijbehorende map.
+2. **`@ProcessBean` moet blijven staan.** Valtimo geeft Operaton niet de hele Spring-context maar
+   alleen de beans met die annotatie — `OperatonWhitelistedBeansPlugin` verzamelt ze via de
+   `@ProcessBean`-qualifier en `SpringExpressionManager` gebruikt dan een `ReadOnlyMapELResolver`
+   over precies die map. Dit staat standaard aan (`valtimo.operaton.bean-whitelisting`,
+   `matchIfMissing = true`).
+
+Klopt een van beide niet, dan faalt elke procesinstantie op de eerste taak met:
+
+```
+Unknown property used in expression: ${mailTest.storeBody(execution)}.
+Cause: Cannot resolve identifier 'mailTest'
+```
+
+Die melding wijst niet naar de oorzaak — hij zegt alleen dat de naam niet oplost, niet waarom.

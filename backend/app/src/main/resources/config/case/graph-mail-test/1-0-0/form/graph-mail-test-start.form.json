@@ -11,7 +11,7 @@
             "refreshOnChange": false
         },
         {
-            "key": "senderMailbox",
+            "key": "pv:senderMailbox",
             "type": "textfield",
             "input": true,
             "label": "Afzender",
@@ -24,7 +24,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "recipients",
+            "key": "pv:recipients",
             "type": "textfield",
             "input": true,
             "label": "Ontvangers",
@@ -37,7 +37,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "cc",
+            "key": "pv:cc",
             "type": "textfield",
             "input": true,
             "label": "CC",
@@ -45,7 +45,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "bcc",
+            "key": "pv:bcc",
             "type": "textfield",
             "input": true,
             "label": "BCC",
@@ -54,7 +54,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "replyTo",
+            "key": "pv:replyTo",
             "type": "textfield",
             "input": true,
             "label": "Reply-To",
@@ -62,7 +62,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "subject",
+            "key": "pv:subject",
             "type": "textfield",
             "input": true,
             "label": "Onderwerp",
@@ -75,7 +75,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "bodyText",
+            "key": "pv:bodyText",
             "type": "textarea",
             "input": true,
             "label": "Berichttekst",
@@ -86,7 +86,7 @@
             "applyMaskOn": "change"
         },
         {
-            "key": "attachmentKb",
+            "key": "pv:attachmentKb",
             "type": "number",
             "input": true,
             "label": "Bijlage (KB)",
@@ -99,7 +99,7 @@
             "tableView": true
         },
         {
-            "key": "herhalingen",
+            "key": "pv:herhalingen",
             "type": "number",
             "input": true,
             "label": "Aantal verzendingen",

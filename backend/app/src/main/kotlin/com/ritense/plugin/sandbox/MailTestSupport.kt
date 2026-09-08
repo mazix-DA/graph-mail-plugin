@@ -17,6 +17,7 @@
 package com.ritense.plugin.sandbox
 
 import com.ritense.resource.service.TemporaryResourceStorageService
+import com.ritense.valtimo.contract.annotation.ProcessBean
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.operaton.bpm.engine.delegate.DelegateExecution
 import org.springframework.stereotype.Component
@@ -32,7 +33,14 @@ import java.util.concurrent.ConcurrentHashMap
  * niet in productiecode thuis.
  *
  * Aanroepen vanuit BPMN via `${mailTest.<methode>(execution)}`.
+ *
+ * [ProcessBean] is niet optioneel. Valtimo geeft Operaton alleen de beans die die annotatie
+ * dragen; alle andere zijn onbereikbaar vanuit een expressie, hoe correct de bean verder ook
+ * geregistreerd is. Zonder deze annotatie faalt elke procesinstantie op
+ * `Unknown property used in expression: ${mailTest.storeBody(execution)}. Cause: Cannot
+ * resolve identifier 'mailTest'`.
  */
+@ProcessBean
 @Component("mailTest")
 class MailTestSupport(
     private val storage: TemporaryResourceStorageService,
