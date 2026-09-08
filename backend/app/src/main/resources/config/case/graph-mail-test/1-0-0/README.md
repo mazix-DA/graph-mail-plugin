@@ -94,3 +94,22 @@ voorbij die taak kwam. Hij telt per procesinstantie, dus elke nieuwe start faalt
 Kopieer de map `config/case/graph-mail-test/` en `MailTestSupport.kt`. De bean heeft alleen
 `TemporaryResourceStorageService` nodig en hangt verder nergens aan vast. Pas de casedefinitie aan
 als `graph-mail-test` bij jou al bestaat.
+
+Twee dingen aan `MailTestSupport.kt` moeten kloppen, anders is de bean onbereikbaar vanuit BPMN:
+
+1. **Het `package` moet onder je eigen `@SpringBootApplication`-klasse vallen**, anders wordt de
+   klasse niet gescand. Pas de `package`-regel aan en leg het bestand in de bijbehorende map.
+2. **`@ProcessBean` moet blijven staan.** Valtimo geeft Operaton niet de hele Spring-context maar
+   alleen de beans met die annotatie — `OperatonWhitelistedBeansPlugin` verzamelt ze via de
+   `@ProcessBean`-qualifier en `SpringExpressionManager` gebruikt dan een `ReadOnlyMapELResolver`
+   over precies die map. Dit staat standaard aan (`valtimo.operaton.bean-whitelisting`,
+   `matchIfMissing = true`).
+
+Klopt een van beide niet, dan faalt elke procesinstantie op de eerste taak met:
+
+```
+Unknown property used in expression: ${mailTest.storeBody(execution)}.
+Cause: Cannot resolve identifier 'mailTest'
+```
+
+Die melding wijst niet naar de oorzaak — hij zegt alleen dat de naam niet oplost, niet waarom.
