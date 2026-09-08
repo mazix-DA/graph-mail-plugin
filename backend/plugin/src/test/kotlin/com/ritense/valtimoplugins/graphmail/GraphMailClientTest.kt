@@ -52,6 +52,7 @@ import java.time.Duration
 class GraphMailClientTest {
     private lateinit var wireMock: WireMockServer
     private lateinit var client: GraphMailClientImpl
+    private lateinit var restClientForTests: RestClient
 
     private val token = "test-token-123"
     private val mailbox = "noreply@test.nl"
@@ -100,36 +101,49 @@ class GraphMailClientTest {
 
         val mapper = ObjectMapper().registerKotlinModule()
 
+        restClientForTests =
+            // Built the same way GraphMailAutoConfiguration.graphMailRestClient builds it. The
+            // transport-failure tests assert on which exception a connection reset produces, and
+            // that is a property of the request factory — testing a plain RestTemplate would prove
+            // nothing about the client that actually ships.
+            RestClient
+                .builder()
+                .requestFactory(
+                    JdkClientHttpRequestFactory(
+                        HttpClient
+                            .newBuilder()
+                            .connectTimeout(Duration.ofSeconds(10))
+                            .followRedirects(HttpClient.Redirect.NEVER)
+                            .version(HttpClient.Version.HTTP_1_1)
+                            .build(),
+                    ).apply { setReadTimeout(Duration.ofSeconds(30)) },
+                ).messageConverters { converters ->
+                    converters.removeIf { it is MappingJackson2HttpMessageConverter }
+                    converters.add(0, MappingJackson2HttpMessageConverter(mapper))
+                }.build()
+
         client =
             GraphMailClientImpl(
-                // Built the same way GraphMailAutoConfiguration.graphMailRestClient builds it. The
-                // transport-failure tests assert on which exception a connection reset produces, and
-                // that is a property of the request factory — testing a plain RestTemplate would prove
-                // nothing about the client that actually ships.
-                restClient =
-                    RestClient
-                        .builder()
-                        .requestFactory(
-                            JdkClientHttpRequestFactory(
-                                HttpClient
-                                    .newBuilder()
-                                    .connectTimeout(Duration.ofSeconds(10))
-                                    .followRedirects(HttpClient.Redirect.NEVER)
-                                    .version(HttpClient.Version.HTTP_1_1)
-                                    .build(),
-                            ).apply { setReadTimeout(Duration.ofSeconds(30)) },
-                        ).messageConverters { converters ->
-                            converters.removeIf { it is MappingJackson2HttpMessageConverter }
-                            converters.add(0, MappingJackson2HttpMessageConverter(mapper))
-                        }.build(),
+                restClient = restClientForTests,
                 tokenBaseUrl = wireMock.baseUrl(),
                 graphBaseUrl = wireMock.baseUrl(),
                 // WireMock is not a Microsoft host, so the strict upload-host check is relaxed here —
-                // exactly the case GraphMailHttpProperties.isProductionGraphEndpoint() reports false for.
+                // exactly the case GraphMailHttpProperties.uploadHostSuffixes() returns null for.
                 // The relaxed check still pins the upload URL to the very host we are talking to.
-                requireMicrosoftUploadHost = false,
+                uploadHostSuffixes = null,
             )
     }
+
+    // A client that believes it is talking to a real cloud, so validateUploadUrl takes the strict
+    // branch. graphBaseUrl still points at WireMock — the suffix set is what decides the branch, and
+    // passing it directly is exactly how GraphMailAutoConfiguration wires it from the properties.
+    private fun clientForCloud(uploadHosts: Set<String>) =
+        GraphMailClientImpl(
+            restClient = restClientForTests,
+            tokenBaseUrl = wireMock.baseUrl(),
+            graphBaseUrl = wireMock.baseUrl(),
+            uploadHostSuffixes = uploadHosts,
+        )
 
     @AfterEach
     fun tearDown() = wireMock.stop()
@@ -727,6 +741,70 @@ class GraphMailClientTest {
         wireMock.verify(1, putRequestedFor(anyUrl()))
         wireMock.verify(1, postRequestedFor(urlPathMatching(sendDraftPath)))
     }
+
+    // ── Upload host validation, strict branch ──────────────────────────────
+    //
+    // Everything above runs with uploadHostSuffixes = null (the sandbox branch, which pins the
+    // upload URL to WireMock's own host). These two exercise the branch that runs in production,
+    // where the URL must sit on one of the configured cloud's hosts. That branch had no test at
+    // all, which is how it kept a commercial-only host list while the configuration happily
+    // accepted sovereign Graph endpoints.
+
+    @Test fun `an upload URL outside the configured cloud is rejected before any bytes are sent`() {
+        stubToken()
+        stubDraftCreate("draft-us")
+        // WireMock's host is 'localhost'; a US Gov cloud accepts neither that nor a commercial host.
+        stubUploadSession("${wireMock.baseUrl()}/upload/foreign")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+
+        val attachment = resolvedAttachment("large.bin", (INLINE_ATTACHMENT_THRESHOLD_BYTES + 1).toInt())
+        assertThrows(GraphMailPermanentException::class.java) {
+            clientForCloud(setOf(".sharepoint.us", ".office365.us")).sendMail(
+                credentials(),
+                OutboundMail(
+                    senderMailbox = mailbox,
+                    toRecipients = recipients("jan@test.nl"),
+                    subject = "T",
+                    bodyHtml = "<p>B</p>",
+                    attachments = listOf(attachment),
+                ),
+            )
+        }
+
+        // The rejection has to land before the attachment leaves the process: that is the whole
+        // point of validating the host Graph handed back.
+        wireMock.verify(0, putRequestedFor(anyUrl()))
+        wireMock.verify(0, postRequestedFor(urlPathMatching(sendDraftPath)))
+    }
+
+    @Test fun `an upload URL over plain http is rejected even on an allowed host`() {
+        stubToken()
+        stubDraftCreate("draft-http")
+        stubUploadSession("${wireMock.baseUrl()}/upload/plain-http")
+        wireMock.stubFor(put(anyUrl()).willReturn(aResponse().withStatus(200)))
+
+        val attachment = resolvedAttachment("large.bin", (INLINE_ATTACHMENT_THRESHOLD_BYTES + 1).toInt())
+        // ".localhost" covers WireMock's own host, so the host check passes and only the scheme is
+        // left to reject it. Attachment bytes must never leave over a connection nobody can vouch for.
+        assertThrows(GraphMailPermanentException::class.java) {
+            clientForCloud(setOf(".localhost")).sendMail(
+                credentials(),
+                OutboundMail(
+                    senderMailbox = mailbox,
+                    toRecipients = recipients("jan@test.nl"),
+                    subject = "T",
+                    bodyHtml = "<p>B</p>",
+                    attachments = listOf(attachment),
+                ),
+            )
+        }
+        wireMock.verify(0, putRequestedFor(anyUrl()))
+    }
+
+    // Acceptance on the strict branch is not tested here on purpose: it needs an https endpoint on
+    // a real Microsoft-suffixed host, which cannot be stubbed locally. What the strict branch
+    // accepts is pinned instead by GraphMailHttpPropertiesTest (which set each cloud gets) together
+    // with `large attachment uses draft upload path` above (the same flow, sandbox branch).
 
     @Test fun `chunk upload sets Content-Range header correctly`() {
         stubToken()
@@ -1326,7 +1404,7 @@ class GraphMailClientTest {
                     tokenBaseUrl = wireMock.baseUrl(),
                     // https, so the proxy has to be asked for a CONNECT tunnel first.
                     graphBaseUrl = "https://graph.microsoft.com",
-                    requireMicrosoftUploadHost = false,
+                    uploadHostSuffixes = null,
                 )
 
             val ex =
@@ -1382,7 +1460,7 @@ class GraphMailClientTest {
                 tokenBaseUrl = wireMock.baseUrl(),
                 // A host that cannot resolve — the failure lands in the connect phase.
                 graphBaseUrl = "http://graph-mail-plugin.invalid",
-                requireMicrosoftUploadHost = false,
+                uploadHostSuffixes = null,
             )
 
         val ex =

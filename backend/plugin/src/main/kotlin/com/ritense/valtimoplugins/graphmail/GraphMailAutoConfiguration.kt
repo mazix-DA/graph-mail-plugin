@@ -266,7 +266,7 @@ class GraphMailAutoConfiguration {
             tokenBaseUrl = properties.tokenBaseUrl,
             graphBaseUrl = properties.graphBaseUrl,
             tokenCache = graphTokenCache,
-            requireMicrosoftUploadHost = properties.isProductionGraphEndpoint(),
+            uploadHostSuffixes = properties.uploadHostSuffixes(),
         )
 
     // ObjectProvider rather than a nullable parameter: it resolves lazily and to nothing at all

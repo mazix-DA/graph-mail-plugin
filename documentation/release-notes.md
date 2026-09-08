@@ -42,6 +42,10 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
 - Een onderbroken upload van een grote bijlage gooide de hele upload weg, of leverde een bijlage met
   een gat erin.
 - Verzenden vanuit een sovereign cloud (US Gov, China) faalde altijd bij het ophalen van het token.
+- In een sovereign cloud (US Gov, China) faalde elke bijlage boven 2 MiB alsnog. De configuratie
+  accepteerde het endpoint, maar de controle op de upload-URL kende alleen commerciële hosts.
+  Kleine mails werkten daardoor wel. Uploadhosts worden nu per cloud bijgehouden, dus een US Gov-
+  omgeving accepteert ook geen commerciële uploadhost meer.
 - Throttling van Entra werd gemeld als "controleer Client ID en Secret".
 - De harde tijdslimiet van 30 seconden per verzending kon met tientallen seconden overschreden worden.
 - Elke mislukte verzending logt nu waarom hij mislukte en of opnieuw proberen zin heeft.
@@ -61,7 +65,15 @@ de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
 
 - Een tracking-pixel kon via `style="background:url(...)"` alsnog door de HTML-filter komen. Ook
   CSS-escapes en -commentaar worden nu herkend.
+- Diezelfde tracking-pixel kon er via `<img src="http://...">` gewoon langs. Een afbeelding wordt
+  opgehaald zodra de ontvanger de mail opent, dus dat verraadt het leesmoment over een onbeveiligde
+  verbinding. `http` vervalt voor afbeeldingen; `https` en `cid:` blijven. Een `<a href="http://...">`
+  blijft wel toegestaan — die wordt pas gevolgd als iemand klikt. Wil je élke externe request
+  uitsluiten, stuur afbeeldingen dan als bijlage en verwijs met `cid:`.
 - Een verkeerd getypt client secret in het testmail-scherm logde de beheerder uit.
+- Een geweigerde upload-URL meldde alleen dát hostvalidatie faalde. Op `DEBUG` staat nu ook welke
+  host het was, zodat een ontbrekend clouddomein te melden is. Uit de foutmelding zelf blijft hij
+  weg: die waarde komt uit een extern antwoord.
 - E-mailadressen worden nu ook gemaskeerd in foutmeldingen van het testmail-endpoint.
 - `graph-mail.http.allow-non-microsoft-endpoints` schakelt de endpoint-controle uit maar logde
   niets. Staat de vlag aan, dan meldt de plugin dat nu bij elke start als `ERROR`.

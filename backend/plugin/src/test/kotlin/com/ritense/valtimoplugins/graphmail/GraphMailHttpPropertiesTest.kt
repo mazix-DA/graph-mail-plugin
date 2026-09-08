@@ -2,6 +2,8 @@ package com.ritense.valtimoplugins.graphmail
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -74,5 +76,85 @@ class GraphMailHttpPropertiesTest {
         assertThrows(IllegalArgumentException::class.java) {
             GraphMailHttpProperties(attachmentConcurrency = 0)
         }
+    }
+
+    // ── Upload hosts per cloud ─────────────────────────────────────────────
+    //
+    // The regression these lock down: the configuration accepted a sovereign Graph endpoint (the
+    // test above proves it) while the upload-URL check only ever knew commercial hosts. Small mails
+    // worked, and the first attachment over 2 MiB failed permanently on host validation.
+
+    @Test fun `a sovereign cloud has upload hosts of its own`() {
+        val usGov =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.microsoftonline.us",
+                graphBaseUrl = "https://graph.microsoft.us",
+            )
+        val china =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.partner.microsoftonline.cn",
+                graphBaseUrl = "https://microsoftgraph.chinacloudapi.cn",
+            )
+        assertNotNull(usGov.uploadHostSuffixes())
+        assertNotNull(china.uploadHostSuffixes())
+    }
+
+    @Test fun `clouds do not share upload hosts`() {
+        val commercial = GraphMailHttpProperties().uploadHostSuffixes()!!
+        val usGov =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.microsoftonline.us",
+                graphBaseUrl = "https://graph.microsoft.us",
+            ).uploadHostSuffixes()!!
+
+        // Each cloud accepts its own SharePoint domain and rejects the other's. A single flat list
+        // would let a US Gov deployment accept a commercial upload host, which is what the boolean
+        // this replaced allowed.
+        assertTrue(commercial.contains(".sharepoint.com"))
+        assertFalse(commercial.contains(".sharepoint.us"))
+        assertTrue(usGov.contains(".sharepoint.us"))
+        assertFalse(usGov.contains(".sharepoint.com"))
+    }
+
+    @Test fun `both US Gov Graph endpoints share one upload host set`() {
+        val gcc =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.microsoftonline.us",
+                graphBaseUrl = "https://graph.microsoft.us",
+            ).uploadHostSuffixes()
+        val dod =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "https://login.microsoftonline.us",
+                graphBaseUrl = "https://dod-graph.microsoft.us",
+            ).uploadHostSuffixes()
+        assertEquals(gcc, dod)
+    }
+
+    @Test fun `every upload host suffix starts with a dot`() {
+        // The match in validateUploadUrl is host.endsWith(suffix); without the leading dot,
+        // "evilsharepoint.com" would satisfy a ".sharepoint.com" entry written as "sharepoint.com".
+        listOf("https://graph.microsoft.com", "https://graph.microsoft.us", "https://microsoftgraph.chinacloudapi.cn")
+            .forEach { graph ->
+                val token =
+                    when {
+                        graph.endsWith(".us") -> "https://login.microsoftonline.us"
+                        graph.endsWith(".cn") -> "https://login.partner.microsoftonline.cn"
+                        else -> "https://login.microsoftonline.com"
+                    }
+                GraphMailHttpProperties(tokenBaseUrl = token, graphBaseUrl = graph)
+                    .uploadHostSuffixes()!!
+                    .forEach { assertTrue(it.startsWith("."), "suffix '$it' for $graph must start with a dot") }
+            }
+    }
+
+    @Test fun `a sandbox endpoint has no upload host set`() {
+        val properties =
+            GraphMailHttpProperties(
+                tokenBaseUrl = "http://localhost:8089",
+                graphBaseUrl = "http://localhost:8089",
+                allowNonMicrosoftEndpoints = true,
+            )
+        // Null means "pin the upload URL to exactly this host" — see GraphMailClientImpl.
+        assertNull(properties.uploadHostSuffixes())
     }
 }
