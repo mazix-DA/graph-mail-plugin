@@ -43,6 +43,24 @@ configuratie in het beheerscherm hebt aangemaakt. Een gefixeerde UUID meeleveren
 
 Doe dit voor **beide** processen; ze hebben allebei een taak met id `send-email`.
 
+## Het formulier schrijft procesvariabelen, geen documentvelden
+
+De velden in `graph-mail-test-start.form.json` dragen allemaal het prefix `pv:` — `pv:senderMailbox`,
+`pv:recipients`, enzovoort. Dat is geen stijlkeuze maar een vereiste: Valtimo schrijft een veld
+zonder prefix naar het **document**, en een veld met `pv:` naar een **procesvariabele**
+(`FormIoFormDefinition` onderscheidt `processVarName` en `documentJsonPointer`).
+
+Zowel de process-links als `MailTestSupport` lezen procesvariabelen. Haal je het prefix weg, dan
+komt de invoer in het document terecht, blijven de procesvariabelen leeg en faalt `send-email` op:
+
+```
+NullPointerException: Parameter specified as non-null is null:
+method ...GraphMailPlugin.sendEmail, parameter senderMailbox
+```
+
+De document-definitie houdt dezelfde velden aan zodat de zaak een geldig schema heeft; het formulier
+vult ze niet.
+
 ## De twee processen
 
 ### `graph-mail-test-process` — T4, T5, T8
