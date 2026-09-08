@@ -108,7 +108,6 @@ Ook met een correct ingestelde scope blijft de whitelist zinvol:
 
 > Dit maakt de Exchange Online-scope niet overbodig: die blijft de primaire controle, omdat hij ook beschermt wanneer het client secret buiten de plugin om wordt misbruikt. De whitelist kan dat niet.
 
-
 ## Actie: send-email
 
 Verstuur een e-mail vanuit een BPMN-serviceTask.
@@ -138,11 +137,15 @@ Bijlagen van 2 MiB of kleiner worden inline (base64) meegestuurd in de sendMail-
 **Dubbele verzending bij transactieretry**
 De plugin-actie vuurt op `SERVICE_TASK_START`. Als de Operaton-transactie na een geslaagde verzending alsnog terugdraait (bijvoorbeeld door een optimistic lock op andere procesdata) en de activiteit opnieuw uitvoert, is de e-mail bij Graph al onomkeerbaar geaccepteerd. De plugin herkent deze herhaling zelf en slaat de tweede Graph-aanroep over; je hoeft hier in het procesmodel niets voor in te richten.
 
-De herkenning gebeurt op een **teller per activity**, die de plugin als procesvariabele bijhoudt (`graphMailPass_<activityId>`). Die teller wordt gelezen vóórdat hij wordt opgehoogd en via de execution weggeschreven, dus hij deelt het lot van de transactie: rolt die terug, dan rolt de ophoging mee en leest de retry hetzelfde nummer; committeert een iteratie, dan begint de volgende bij een hoger nummer.
+De bescherming bestaat uit twee delen, die elk een tegengestelde eigenschap moeten hebben. Dat onderscheid is bepalend en verklaart waarom de opzet op het eerste gezicht omslachtig oogt.
 
-> **Let op:** de plugin schrijft daarmee een variabele op elke procesinstantie die mail verstuurt. Die is zichtbaar in Cockpit en in de variabelenhistorie. De naam is genamespaced en per activity, zodat twee send-email-taken in één proces onafhankelijk tellen.
+**De sleutel** — waaraan een verzending herkend wordt — is `execution.id : activityId : volgnummer`. Het volgnummer komt uit een procesvariabele (`graphMailPass_<activityId>`) en is daarmee **met opzet transactioneel**: draait de transactie terug, dan draait het volgnummer mee terug en berekent de retry exact dezelfde sleutel. Committeert een iteratie van een loop, dan begint de volgende bij een hoger nummer en dus bij een andere sleutel.
 
-Dat lijkt omslachtig, maar geen van de voor de hand liggende alternatieven werkt — beide zijn tegen een echte engine getest in `ActivityInstanceIdContractTest`:
+**De markering** — of die sleutel al verstuurd is — ligt in het geheugen en is **met opzet niet transactioneel**. Deelde zij het lot van de transactie, dan verdween zij bij de rollback en was zij voor de volgende poging nooit zichtbaar. Om die reden is een procesvariabele ongeschikt als markering, terwijl zij als onderdeel van de sleutel juist het gewenste gedrag oplevert.
+
+> **Let op:** de plugin schrijft daarmee een variabele op elke procesinstantie die mail verstuurt. Die is zichtbaar in Cockpit en in de variabelenhistorie. De naam is genamespaced per activity, zodat twee send-email-taken in één proces onafhankelijk tellen.
+
+De alternatieven voor die sleutel zijn getoetst tegen een draaiende engine, in `ActivityInstanceIdContractTest`:
 
 | Sleutel | Stabiel over retry? | Uniek per loop-iteratie? |
 |---------|--------------------|--------------------------|
@@ -150,9 +153,7 @@ Dat lijkt omslachtig, maar geen van de voor de hand liggende alternatieven werkt
 | `activityInstanceId` | **nee** — krijgt per poging een nieuw nummer | ja |
 | teller in procesvariabele | ja | ja |
 
-De eerste drie velden kunnen de twee situaties principieel niet scheiden: bij zowel een retry als een loop-iteratie is `execution.id` gelijk, `currentActivityId` gelijk en `activityInstanceId` verschillend. Een hash over de mailinhoud is evenmin bruikbaar: een aanmaningsproces dat bewust twee keer dezelfde mail stuurt zou dan stilzwijgend worden ingeslikt.
-
-> **Let op — een procesvariabele werkt hier níet als guard.** Die wordt geschreven binnen dezelfde transactie die terugrolt, dus hij verdwijnt samen met de retry en is voor de volgende poging nooit zichtbaar. Daarom gebruikt de plugin een bewust niet-transactionele, in-geheugen guard.
+Geen van de engine-eigen velden kan de twee situaties scheiden: bij zowel een retry als een nieuwe loop-iteratie zijn `execution.id` en `currentActivityId` gelijk, terwijl `activityInstanceId` in beide gevallen verschilt. Een hash over de mailinhoud is evenmin bruikbaar — een aanmaningsproces dat bewust twee keer dezelfde mail stuurt, zou dan stilzwijgend worden ingeslikt.
 
 > **Beperking:** de guard beschermt tegen een retry die dezelfde, nog draaiende JVM-instantie afhandelt — het realistische scenario, waarbij de retry milliseconden tot seconden later plaatsvindt. Hij overleeft géén herstart van de applicatie tussen de oorspronkelijke verzending en een latere retry. Is die garantie in jouw situatie nodig, dan is aanvullende deduplicatie aan de ontvangerskant het aangewezen middel.
 
@@ -206,12 +207,13 @@ Elke mislukte verzending logt een `verdict`-veld dat aangeeft wat de beheerder m
 | `TRANSIENT` | Tijdelijk (429/5xx, of een netwerkfout op een herhaalbare stap zoals conceptaanmaak, het aanmaken van een upload-sessie, of een verbinding die nooit tot stand kwam); de job-executor probeert het opnieuw. Een transportfout op `sendMail` of `messages/{id}/send` nádat het verzoek verstuurd is valt hier **niet** onder — die is `UNKNOWN`. |
 
 Deze classificatie zit bewust in de logging en niet in een `BpmnError`: het omzetten van permanente fouten naar een BPMN-fout zou de procesafhandeling van elk bestaand model wijzigen, en een niet-afgevangen `BpmnError` degradeert tot een incident met de melding "no catching boundary event found" — minder bruikbaar dan de fout die de plugin nu gooit. Wil je permanente fouten in het procesmodel afvangen, gebruik dan een `failedJobRetryTimeCycle` in combinatie met een incident-handler.
+
 **HTML-body sanitisatie**
 De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toegestaan: opmaaktags, tabellen, inline `style`-attributen, `<img>` met `https`- of `cid`-bronnen. Verwijderd: `<style>`-blokken, `<script>`, iframes, `data:` URI's, JavaScript-eventattributen. Ook binnen toegestane inline `style`-attributen worden `url(...)`, `@import`, `expression(...)` en `javascript:` weggefilterd — anders zou een `style="background:url(https://tracker/pixel.png)"` alsnog een externe request (tracking pixel) veroorzaken, precies waarvoor `<style>`-blokken geweerd worden. Het hele `style`-attribuut vervalt bij zo'n treffer, niet alleen de betreffende declaratie: een waarde die al een ontwijkingspoging bevat, laat zich niet betrouwbaar in een schoon en een vuil deel splitsen.
 
 `<img src="http://...">` wordt sinds 1.0.4 eveneens geweerd. Een afbeelding in een e-mail wordt opgehaald zodra de ontvanger het bericht opent, dus een `http`-bron vertelt een derde partij wanneer een burger zijn correspondentie las, over een verbinding die niemand kan garanderen.
 
-**Logo's blijven gewoon werken.** Beide manieren waarop je er in de praktijk een meestuurt, zijn ongemoeid:
+Logo's blijven ongewijzigd werken; beide gangbare manieren om er een mee te sturen zijn ongemoeid:
 
 | Bron | Resultaat |
 |---|---|
@@ -219,11 +221,11 @@ De HTML-body wordt automatisch gesanitiseerd via jsoup vóór verzending. Toeges
 | `<img src="https://gemeente.nl/logo.png">` | werkt — logo op de eigen server. |
 | `<img src="http://gemeente.nl/logo.png">` | `src` wordt verwijderd. |
 
-Het verschil tussen de laatste twee is de **s**. Heb je een bestaand sjabloon met een logo op `http://`, dan moet dat naar `https://` of naar `cid:` — wat je sowieso wilt.
+Een bestaand sjabloon met een logo op `http://` moet dus naar `https://` of naar `cid:`.
 
-Wees eerlijk over de grens daarvan: ook een `https`-afbeelding is een externe request en kan dus als tracking pixel dienen. Het verschil met `url()` in inline CSS is dat die in transactionele post geen legitiem doel dient en `<img>` wel. Wil je élke externe request uitsluiten, gebruik dan uitsluitend `cid:`-bronnen. Een `<a href="http://...">` blijft overigens wel toegestaan: een link wordt pas gevolgd als de ontvanger erop klikt.
+De grens daarvan is beperkt: ook een `https`-afbeelding is een externe request en kan als tracking pixel dienen. Het onderscheid met `url()` in inline CSS is dat die in transactionele post geen legitiem doel dient, terwijl `<img>` dat wel heeft. Wie elke externe request wil uitsluiten, gebruikt uitsluitend `cid:`-bronnen. Een `<a href="http://...">` blijft toegestaan: een link wordt pas gevolgd wanneer de ontvanger erop klikt.
 
-> **De sanitisatie is niet met T1 t/m T8 te beproeven.** `MailTestSupport` zet de berichttekst uit het startformulier door een `escapeHtml` voordat het de HTML samenstelt, dus markup die je daar intypt komt als leesbare tekst aan en bereikt de sanitizer nooit als element. De testmail-knop gebruikt een vaste body. Het gedrag is gedekt door unit tests in `GraphMailPluginTest` — zoek op `an http image source is stripped` en op de testgevallen rond `style`-attributen. Als de body na sanitisatie leeg is, gooit de plugin een fout — controleer de HTML-inhoud die is opgeslagen op het opgegeven `contentId`.
+Blijft de body na sanitisatie leeg, dan gooit de plugin een fout. Controleer in dat geval de HTML die is opgeslagen op het opgegeven `contentId`.
 
 **Limieten**
 
@@ -317,11 +319,11 @@ Korte haperingen worden nog steeds in de aanroep zelf opgevangen; één backoff 
 > | `R5/PT10M` | 50 minuten | **nee** — laatste retries vallen buiten de bescherming |
 > | `R3/PT1H` | 3 uur | **nee** |
 >
-> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SentMarkerStore`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ténkoste van de duplicaatbescherming.
+> Heb je een lange cyclus nodig omdat de throttling van jouw tenant daarom vraagt, vervang dan de `SentMarkerStore`-bean door een exemplaar met een ruimere `entryTtlMs` — zie *Wanneer de guard de verzending niet meer herkent* hierboven. Doe je dat niet, dan kies je impliciet voor langere retries ten koste van de duplicaatbescherming.
 
-Resterende maximale blokkeerttijden per verzending:
+Resterende maximale blokkeertijden per verzending:
 
-| Situatie | Maximale blokkeerttijd |
+| Situatie | Maximale blokkeertijd |
 |----------|----------------------|
 | Wachten op een nieuwe poging (backoff, `Retry-After`) | 2 seconden totaal per aanroep |
 | Reguliere verzending, inclusief netwerktijd | 30 seconden |
@@ -354,7 +356,7 @@ Bijlagen en de body worden volledig in het geheugen gehouden zolang een verzendi
 
 | Soort verzending | Piek per verzending | Hoeveel er tegelijk kunnen | Deelplafond |
 |---|---|---|---|
-| Mét bijlagen | ≈ 33 MiB (25 bijlagen + 5 body + 3,2 chunk-buffer) | `graph-mail.http.attachment-concurrency` (default **8**) | ≈ 265 MiB |
+| Mét bijlagen | ≈ 33 MiB (25 MiB bijlagen + 5 MiB body + 3,2 MiB chunk-buffer) | `graph-mail.http.attachment-concurrency` (default **8**) | ≈ 265 MiB |
 | Zónder bijlagen | ≈ 5 MiB (body) | `operaton.bpm.job-execution.max-pool-size` (aanbevolen **50**) | ≈ 250 MiB |
 
 Met de standaardwaarden komt het theoretische plafond daarmee op ruwweg **een halve GB** heap voor e-mails in transit.

@@ -4,139 +4,191 @@ Overzicht van wijzigingen per versie van de Graph Mail-plugin.
 
 ## 1.0.4
 
+Deze release maakt het verzenden betrouwbaar onder de omstandigheden waarin het eerder stukliep:
+throttling door Graph, een teruggedraaide transactie, een loop over dezelfde taak, en een uitgaande
+proxy. Daarnaast verhuist een aantal instellingen van de beheer-UI naar `application.yml`, omdat het
+daar thuishoort.
+
 ### Actie vereist
 
-**Endpoints en timeouts verhuizen naar `application.yml`.** `tokenBaseUrl`, `graphBaseUrl`,
-`connectTimeoutSeconds` en `readTimeoutSeconds` zijn geen pluginproperty meer. Ze staan nu onder
-`graph-mail.http`. Bestaande pluginconfiguraties met afwijkende waarden negeren die na de upgrade;
-zet ze over. Alleen Microsoft-endpoints worden geaccepteerd — een eigen host laat de applicatie bij
-opstarten falen. Zie [plugin.md](plugin.md).
+**Endpoints en timeouts staan nu in `application.yml`.** `tokenBaseUrl`, `graphBaseUrl`,
+`connectTimeoutSeconds` en `readTimeoutSeconds` zijn geen pluginproperty meer; ze staan onder
+`graph-mail.http`. Bestaande configuraties met afwijkende waarden negeren die na de upgrade, dus zet
+ze over. Alleen Microsoft-endpoints worden geaccepteerd — een eigen host laat de applicatie bij het
+opstarten falen. De aanleiding staat in [plugin.md](plugin.md): het client secret wordt naar
+`tokenBaseUrl` gePOST, en die instelbaar houden vanuit de beheer-UI was een exfiltratiepad.
 
-**De afzender-whitelist wijzigen vraagt nu om het client secret.** Wie `allowedSenders` aanpast,
-moet het `clientSecret` opnieuw invullen. Ongewijzigd laten verandert niets. Herordenen, andere
-spatiëring of hoofdletters tellen niet als wijziging; een adres verwijderen wel. Uit te schakelen
+**De afzender-whitelist wijzigen vraagt om het client secret.** Wie `allowedSenders` aanpast, moet
+het `clientSecret` in dezelfde request opnieuw meegeven. Een adres toevoegen is immers een
+rechtenuitbreiding: vanaf dat moment kan er namens die mailbox gemaild worden. Laat je de lijst
+ongewijzigd, dan verandert er niets en mag het secretveld leeg blijven. Herordenen, andere
+spatiëring en hoofdletters tellen niet als wijziging; een adres verwijderen wel. Uit te schakelen
 met `graph-mail.require-secret-for-allowlist-change: false`.
 
-**Stel een `failedJobRetryTimeCycle` in** op de send-email service task, bijvoorbeeld `R5/PT2M`.
-De plugin geeft een verzending nu na hooguit twee seconden wachten terug aan de engine in plaats van
-de thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak.
+**Stel een `failedJobRetryTimeCycle` in** op de send-email service task, bijvoorbeeld `R5/PT2M`. De
+plugin geeft een verzending nu na hooguit twee seconden wachten terug aan de engine in plaats van de
+thread bezet te houden, en leunt daarvoor op de retry-instelling van de taak. Houd de totale duur
+van die cyclus onder de dertig minuten: daarna vergeet de duplicaatbescherming een verzending.
 
 **De plugin schrijft een procesvariabele.** Elke procesinstantie die mail verstuurt krijgt
-`graphMailPass_<activityId>`. Die is zichtbaar in Cockpit en in de variabelenhistorie.
+`graphMailPass_<activityId>`, zichtbaar in Cockpit en in de variabelenhistorie.
 
-### Opgelost
+### Verzendingen komen niet meer dubbel of helemaal niet aan
 
-- Achter een uitgaande proxy faalde elke verzending met een connectiefout, en de job-executor bleef
-  het eindeloos opnieuw proberen. De plugin gebruikt nu weer de proxy-instellingen van de JVM en
-  logt bij opstarten welke proxy in gebruik is. Een afwijkende proxy stel je in met
-  `graph-mail.http.proxy-host` en `proxy-port`.
-- Een loop over dezelfde service task verstuurde alleen de eerste e-mail. De rest werd stil
-  overgeslagen terwijl het proces doorliep alsof er verstuurd was.
-- Bij een teruggedraaide transactie kon dezelfde mail alsnog twee keer uitgaan.
-- Een read-timeout op de verzendaanroep leidde tot herhaalde pogingen, waardoor de ontvanger
-  meerdere kopieën kon krijgen. Zo'n verzending wordt nu gemeld als `verdict=UNKNOWN`: mogelijk
-  aangekomen, controleer de mailbox.
-- Bij throttling door Graph lag de hele engine stil, ook voor werk dat niets met e-mail te maken had.
-- Een verlopen token kon de melding opleveren dat `Mail.Send` ontbreekt.
-- Een verzending die op het antwoord time-oute, verwijderde het bericht daarna uit Verzonden items.
-- Een onderbroken upload van een grote bijlage gooide de hele upload weg, of leverde een bijlage met
-  een gat erin.
-- Verzenden vanuit een sovereign cloud (US Gov, China) faalde altijd bij het ophalen van het token.
-- In een sovereign cloud (US Gov, China) faalde elke bijlage boven 2 MiB alsnog. De configuratie
-  accepteerde het endpoint, maar de controle op de upload-URL kende alleen commerciële hosts.
-  Kleine mails werkten daardoor wel. Uploadhosts worden nu per cloud bijgehouden, dus een US Gov-
-  omgeving accepteert ook geen commerciële uploadhost meer.
-- Throttling van Entra werd gemeld als "controleer Client ID en Secret".
-- De harde tijdslimiet van 30 seconden per verzending kon met tientallen seconden overschreden worden.
-- Elke mislukte verzending logt nu waarom hij mislukte en of opnieuw proberen zin heeft.
-- Een proxy die om authenticatie vroeg (407) werd behandeld als een tijdelijke storing, dus de
-  job-executor bleef herproberen op iets dat elke poging identiek weigert. Nu een permanente fout
-  die naar de proxy wijst in plaats van naar Graph. Let op: een proxy die authenticatie eist wordt
-  niet ondersteund — de HTTP-client kan geen proxy-credentials aanbieden. Zie [plugin.md](plugin.md).
-- Mislukte een verzending via de upload-sessie op een manier waaruit blijkt dat er niets verstuurd
-  is, dan bleef het concept achter in de afzendermailbox. Bij een cyclus als `R5/PT2M` liepen die
-  op tot vijf per mislukte verzending. Een verzending met onzekere afloop laat het concept nog
-  steeds met rust — dat kan al in Verzonden items staan.
-- Een onderbroken verzending (bijvoorbeeld bij het afsluiten van de applicatie) kwam in de
-  auditlog terecht als `verdict=UNCLASSIFIED` met een stacktrace, in plaats van als tijdelijk.
-- Een onbruikbare bijlagenaam of een te lange naam liet de verzending pas bij Graph stuklopen.
+Vier situaties konden ertoe leiden dat een ontvanger twee keer dezelfde mail kreeg, of juist geen.
+
+Bij een teruggedraaide transactie kon dezelfde mail alsnog twee keer uitgaan. De plugin herkent die
+herhaling nu en slaat de tweede Graph-aanroep over. De keerzijde van diezelfde bescherming was dat
+een loop over dezelfde service task alleen de eerste e-mail verstuurde en de rest stil oversloeg,
+terwijl het proces doorliep alsof er verzonden was. Beide gevallen worden nu uit elkaar gehouden;
+hoe dat werkt en waar de grenzen liggen staat in [plugin.md](plugin.md).
+
+Een read-timeout op de verzendaanroep leidde tot herhaalde pogingen, waarmee de ontvanger meerdere
+kopieën kon krijgen. Zo'n verzending wordt nu gemeld als `verdict=UNKNOWN` — mogelijk aangekomen,
+controleer de mailbox — en wordt niet automatisch herhaald. In het verlengde daarvan verwijderde een
+verzending die op het antwoord time-oute het bericht daarna uit Verzonden items; dat gebeurt niet
+meer.
+
+Tot slot bleef bij een mislukte verzending via de upload-sessie het concept achter in de
+afzendermailbox. Bij een cyclus als `R5/PT2M` liepen die op tot vijf per mislukte verzending.
+Concepten worden nu opgeruimd zodra vaststaat dat er niets verstuurd is; bij een onzekere afloop
+blijft het concept met rust, omdat het al in Verzonden items kan staan.
+
+### De engine loopt niet meer vast op één externe API
+
+Bij throttling door Graph lag de hele engine stil, ook voor werk dat niets met e-mail te maken had:
+alle job-executor threads lagen tegelijk een `Retry-After` uit te zitten. De plugin wacht nu hooguit
+twee seconden per aanroep en geeft de thread daarna terug aan de engine. De harde tijdslimiet van
+dertig seconden per verzending, die met tientallen seconden overschreden kon worden, wordt weer
+gerespecteerd.
+
+Een verwant risico is het geheugen: een verzending houdt haar bijlagen volledig in de heap.
+`graph-mail.http.attachment-concurrency` begrenst nu hoeveel verzendingen mét bijlagen tegelijk
+lopen, los van de thread-pool. Zonder die grens kon een piek in bijlagen het geheugen laten
+vollopen. Verzendingen zonder bijlagen worden niet begrensd.
+
+Daarnaast gebruikt de plugin één gedeelde, gepoolde HTTP-verbinding voor alle verzendingen. Eerder
+werd per plugin-actie een nieuwe client opgebouwd, waardoor elke e-mail een volledige TLS-handshake
+kostte.
+
+### Netwerk en cloudomgeving
+
+Achter een uitgaande proxy faalde élke verzending met een connectiefout, en omdat die fout als
+tijdelijk gold bleef de job-executor het eindeloos proberen — een storing die eruitziet als een
+netwerkprobleem terwijl de configuratie de oorzaak is. De plugin volgt nu weer de proxy-instellingen
+van de JVM en logt bij het opstarten welke proxy hij gebruikt. Een afwijkende proxy stel je in met
+`graph-mail.http.proxy-host` en `proxy-port`.
+
+Vroeg die proxy om authenticatie, dan werd de `407` behandeld als tijdelijke storing en bleef de
+job-executor herproberen op iets dat elke poging identiek weigert. Dat is nu een permanente fout die
+naar de proxy wijst in plaats van naar Graph. Een proxy die authenticatie eist wordt overigens niet
+ondersteund: de HTTP-client kan geen proxy-credentials aanbieden.
+
+Verzenden vanuit een sovereign cloud (US Gov, China) faalde altijd al bij het ophalen van het token.
+Toen dat was opgelost, bleek elke bijlage boven 2 MiB alsnog te falen: de configuratie accepteerde
+het sovereign endpoint, maar de controle op de upload-URL kende uitsluitend commerciële hosts. Kleine
+mails werkten daardoor wel, wat het lastig te herkennen maakte. Uploadhosts worden nu per cloud
+bijgehouden — een US Gov-omgeving accepteert dus ook geen commerciële uploadhost meer.
+
+Tot slot gooide een onderbroken upload van een grote bijlage de hele upload weg, of leverde hij een
+bijlage met een gat erin. De plugin volgt nu de positie die Graph zelf teruggeeft, ook wanneer die
+achteruit wijst, en breekt af wanneer de upload niet meer vordert.
 
 ### Beveiliging
 
-- Een tracking-pixel kon via `style="background:url(...)"` alsnog door de HTML-filter komen. Ook
-  CSS-escapes en -commentaar worden nu herkend.
-- Diezelfde tracking-pixel kon er via `<img src="http://...">` gewoon langs. Een afbeelding wordt
-  opgehaald zodra de ontvanger de mail opent, dus dat verraadt het leesmoment over een onbeveiligde
-  verbinding. `http` vervalt voor afbeeldingen; `https` en `cid:` blijven, dus een logo werkt gewoon
-  — alleen een bestaand sjabloon met een logo op `http://` moet naar `https://` of `cid:`. Een
-  `<a href="http://...">` blijft wel toegestaan: die wordt pas gevolgd als iemand klikt. Wil je élke
-  externe request uitsluiten, stuur afbeeldingen dan als bijlage en verwijs met `cid:`.
-- Een verkeerd getypt client secret in het testmail-scherm logde de beheerder uit.
-- Een geweigerde upload-URL meldde alleen dát hostvalidatie faalde. Op `DEBUG` staat nu ook welke
-  host het was, zodat een ontbrekend clouddomein te melden is. Uit de foutmelding zelf blijft hij
-  weg: die waarde komt uit een extern antwoord.
-- E-mailadressen worden nu ook gemaskeerd in foutmeldingen van het testmail-endpoint.
-- `graph-mail.http.allow-non-microsoft-endpoints` schakelt de endpoint-controle uit maar logde
-  niets. Staat de vlag aan, dan meldt de plugin dat nu bij elke start als `ERROR`.
-- `tenantId` wordt server-side gevalideerd en percent-encoded in de token-URL. Geen UUID-eis: een
-  verified domain en de aliassen `common` / `organizations` blijven gewoon geldig.
-- De naam en het content-type van een bijlage komen uit resource-metadata en gingen ongefilterd
-  door naar Graph en de logging. Nu gecontroleerd zoals elk ander extern beinvloedbaar veld.
-- Het `non-proxy-hosts`-veld accepteerde een komma-gescheiden lijst die stil nergens op matchte,
-  waardoor intranetverkeer alsnog door de proxy ging. Dat is nu een startupfout.
+Twee routes lieten een tracking pixel door de HTML-filter. Via `style="background:url(...)"` kwam
+een externe request alsnog binnen; die wordt nu geweerd, inclusief de varianten met CSS-escapes en
+commentaar waarmee een letterlijke filtercontrole te omzeilen was. Diezelfde pixel kon er ook via
+`<img src="http://...">` langs. Een afbeelding wordt opgehaald zodra de ontvanger de mail opent, dus
+een `http`-bron verraadt het leesmoment over een onbeveiligde verbinding. `http` vervalt daarom voor
+afbeeldingen. Logo's blijven werken: `https` en `cid:` zijn ongemoeid, en alleen een sjabloon met een
+logo op `http://` moet verhuizen. Een `<a href="http://...">` blijft toegestaan, want een link wordt
+pas gevolgd wanneer iemand klikt.
 
-### Overig
+Rond het testmail-scherm zijn twee lekken gedicht: e-mailadressen worden nu ook gemaskeerd in
+foutmeldingen van het endpoint, en een verkeerd getypt client secret logde de beheerder niet langer
+uit. De naam en het content-type van een bijlage komen uit resource-metadata en gingen ongefilterd
+door naar Graph en de logging; die worden nu gecontroleerd zoals elk ander extern beïnvloedbaar veld.
+`tenantId` wordt server-side gevalideerd en percent-encoded in de token-URL, zonder UUID-eis: een
+verified domain en de aliassen `common` en `organizations` blijven geldig.
 
-- Eén gedeelde HTTP-verbinding voor alle verzendingen in plaats van een nieuwe per e-mail.
-- `graph-mail.http.attachment-concurrency` begrenst hoeveel verzendingen met bijlagen tegelijk
-  lopen. Zonder die grens kon een piek in bijlagen het geheugen laten vollopen.
-- Elk Graph-verzoek draagt nu een `client-request-id`, en bij een fout staan dat id en Graphs eigen
-  `request-id` in de auditlog. Dat zijn de twee waarden waar Microsoft Support als eerste om vraagt.
-- Micrometer-metrics wanneer de applicatie Actuator heeft: `graph.mail.sends`,
-  `graph.mail.send.duration`, en gauges voor de vrije bijlage-slots en de tokencache. De
-  `outcome`-tag gebruikt hetzelfde vocabulaire als het `verdict`-veld in de auditlog. Zonder
-  Micrometer op het classpath verandert er niets.
-- Waar de duplicaatguard zijn markeringen bewaart zit nu achter `SentMarkerStore`. Draai je meerdere
-  nodes, dan kun je een eigen implementatie bijzetten zonder de guard zelf te vervangen; zie
-  [plugin.md](plugin.md). De standaard blijft in-memory en dus per JVM.
+Twee instellingen konden stilzwijgend niets doen. `graph-mail.http.allow-non-microsoft-endpoints`
+schakelt de endpoint-controle uit maar logde niets; staat die vlag aan, dan meldt de plugin dat nu
+bij elke start als `ERROR`. En `non-proxy-hosts` accepteerde een komma-gescheiden lijst die nergens
+op matchte, waardoor intranetverkeer alsnog door de proxy ging — dat is nu een startupfout.
+
+### Diagnose bij een mislukte verzending
+
+Elke mislukte verzending logt nu een `verdict` dat zegt of opnieuw proberen zin heeft:
+`PERMANENT_INPUT`, `PERMANENT_REMOTE`, `TRANSIENT` of `UNKNOWN`. Een beheerder hoeft daarvoor geen
+stacktrace te lezen. Twee meldingen die eerder in de verkeerde richting wezen zijn gecorrigeerd:
+throttling van Entra werd gemeld als "controleer Client ID en Secret", en een onderbroken verzending
+bij het afsluiten van de applicatie kwam als `UNCLASSIFIED` met stacktrace in de auditlog in plaats
+van als tijdelijk. Een onbruikbare of te lange bijlagenaam liep bovendien pas bij Graph stuk; dat
+wordt nu vooraf afgevangen.
+
+Elk Graph-verzoek draagt een `client-request-id`, en bij een fout staan dat id en Graphs eigen
+`request-id` in de auditlog — de twee waarden waar Microsoft Support als eerste om vraagt. Een
+geweigerde upload-URL meldde alleen dát hostvalidatie faalde; op `DEBUG` staat nu ook welke host het
+was, zodat een ontbrekend clouddomein te melden is. Uit de foutmelding zelf blijft die host weg,
+omdat de waarde uit een extern antwoord komt.
+
+Heeft de applicatie Actuator, dan publiceert de plugin Micrometer-metrics: `graph.mail.sends`,
+`graph.mail.send.duration` en gauges voor de vrije bijlage-slots en de tokencache. De `outcome`-tag
+gebruikt hetzelfde vocabulaire als het `verdict`-veld. Zonder Micrometer op het classpath verandert
+er niets.
+
+### Voorbereid op meerdere nodes
+
+Waar de duplicaatbescherming haar markeringen bewaart zit nu achter `SentMarkerStore`. De standaard
+blijft in-memory en dus per JVM. Draai je meerdere nodes en heb je de garantie nodig, dan zet je een
+eigen implementatie bij zonder de guard zelf te vervangen; de enige — maar bepalende — eis is dat
+die opslag buiten de omliggende transactie commit. Zie [plugin.md](plugin.md).
 
 ## 1.0.3
 
+Deze release maakt de afzender-whitelist verplicht en dicht een aantal lekken rond tokens en
+logging.
+
 ### Actie vereist
 
-**`allowedSenders` is verplicht geworden.** Elke verzending wordt geweigerd tenzij het
-afzenderadres op de whitelist van de pluginconfiguratie staat. Bestaande configuraties versturen na
-de upgrade **niets meer** totdat de lijst eenmalig is ingevuld en opgeslagen. Volledige adressen en
-`@domein`-entries mogen allebei. Geldt ook voor het testmail-endpoint.
-
-### Opgelost
-
-- Bij een teruggedraaide transactie kon dezelfde mail twee keer uitgaan. (Werkte nog niet volledig;
-  zie 1.0.4.)
-- De testmail toonde letterlijk `$escapedSender` in de voettekst in plaats van het afzenderadres.
-- Het aanmaken van een upload-sessie voor grote bijlagen probeerde het nooit opnieuw bij throttling,
-  en de conceptflow niet bij netwerkfouten.
-- De rate-limiter van het testmail-endpoint hield voor elke gebruiker permanent een entry vast.
+**`allowedSenders` is verplicht geworden.** Elke verzending wordt geweigerd tenzij het afzenderadres
+op de whitelist van de pluginconfiguratie staat. Bestaande configuraties versturen na de upgrade
+**niets meer** totdat de lijst eenmalig is ingevuld en opgeslagen. Volledige adressen en
+`@domein`-entries mogen allebei; de regel geldt ook voor het testmail-endpoint.
 
 ### Beveiliging
 
-- Tokens werden niet gecached over verzendingen heen, waardoor elke e-mail een nieuwe tokenaanvraag
-  deed. Een configuratie met een verkeerd secret kon bovendien meeliften op het token van een
-  andere configuratie voor dezelfde tenant.
-- Het client secret en het access-token konden in cleartext in de log belanden.
-- Het afzenderadres stond ongemaskeerd in het event van het testmail-endpoint.
-- `jsoup` naar 1.23.1 (CVE-2026-71497). De filterinstellingen van deze plugin waren niet
-  daadwerkelijk kwetsbaar, maar het is de bibliotheek waar de HTML-sanitisatie op leunt.
-- Script-injectie in de publicatie-workflows gedicht en `tj-actions/changed-files` op een commit-SHA
-  vastgezet in plaats van een verplaatsbare tag (CVE-2025-30066).
+Tokens werden niet gecached over verzendingen heen, waardoor elke e-mail een nieuwe tokenaanvraag
+deed. Ernstiger was de keuze van de cachesleutel: een configuratie met een verkeerd secret kon
+meeliften op het token dat een andere configuratie voor dezelfde tenant had opgehaald. De sleutel
+bevat nu een hash van het secret, zodat dat niet meer kan.
 
-### Overig
+Daarnaast konden het client secret en het access-token in cleartext in de log belanden, en stond het
+afzenderadres ongemaskeerd in het event van het testmail-endpoint. Beide zijn gedicht.
 
-- `cn.lalaki.central` stond als runtime-dependency in de gepubliceerde POM, waardoor elke consument
-  een Gradle-publicatieplugin binnenhaalde. Verwijderd.
-- De frontend bouwt API-URL's nu via `ConfigService`, zodat de plugin ook werkt wanneer frontend en
-  backend op verschillende origins draaien.
-- ktlint toegevoegd aan de PR-checks; Dependabot ingesteld voor gradle, npm en github-actions.
+`jsoup` is bijgewerkt naar 1.23.1 vanwege CVE-2026-71497. De filterinstellingen van deze plugin
+waren niet daadwerkelijk kwetsbaar, maar het is de bibliotheek waar de HTML-sanitisatie op leunt.
+In de publicatie-workflows is script-injectie gedicht en is `tj-actions/changed-files` op een
+commit-SHA vastgezet in plaats van op een verplaatsbare tag (CVE-2025-30066).
+
+### Verzenden en testmail
+
+Bij een teruggedraaide transactie kon dezelfde mail twee keer uitgaan. De bescherming die hiervoor
+werd toegevoegd bleek nog niet volledig; 1.0.4 maakt haar af.
+
+Verder toonde de testmail letterlijk `$escapedSender` in de voettekst in plaats van het
+afzenderadres, probeerde het aanmaken van een upload-sessie voor grote bijlagen het nooit opnieuw bij
+throttling — en de conceptflow niet bij netwerkfouten — en hield de rate-limiter van het
+testmail-endpoint voor elke gebruiker permanent een entry vast.
+
+### Publicatie en frontend
+
+`cn.lalaki.central` stond als runtime-dependency in de gepubliceerde POM, waardoor elke consument
+een Gradle-publicatieplugin binnenhaalde; die is verwijderd. De frontend bouwt API-URL's nu via
+`ConfigService`, zodat de plugin ook werkt wanneer frontend en backend op verschillende origins
+draaien. Tot slot is ktlint aan de PR-checks toegevoegd en is Dependabot ingesteld voor gradle, npm
+en github-actions.
 
 ## 1.0.2
 
