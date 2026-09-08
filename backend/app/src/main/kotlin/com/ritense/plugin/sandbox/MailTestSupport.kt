@@ -37,7 +37,7 @@ import java.util.concurrent.ConcurrentHashMap
  * [ProcessBean] is niet optioneel. Valtimo geeft Operaton alleen de beans die die annotatie
  * dragen; alle andere zijn onbereikbaar vanuit een expressie, hoe correct de bean verder ook
  * geregistreerd is. Zonder deze annotatie faalt elke procesinstantie op
- * `Unknown property used in expression: \${mailTest.storeBody(execution)}. Cause: Cannot
+ * `Unknown property used in expression: ${mailTest.storeBody(execution)}. Cause: Cannot
  * resolve identifier 'mailTest'`.
  */
 @ProcessBean
